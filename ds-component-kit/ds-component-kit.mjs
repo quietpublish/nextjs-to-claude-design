@@ -67,13 +67,44 @@ function pickComponents(cfg, flags, pos) {
 }
 
 // ---------- esbuild ----------------------------------------------------------
-function esbuild(args) {
+// Non-dying runner — returns { ok, stderr } so callers can recover (e.g. evict a
+// failing component and retry) instead of aborting the whole build.
+function runEsbuild(cfg, args) {
   const local = join(cfg.repoRoot, "node_modules", ".bin", "esbuild");
   const bin = existsSync(local) ? local : "npx";
   const full = existsSync(local) ? args : ["--yes", `esbuild@${ESBUILD_VERSION}`, ...args];
   const r = spawnSync(bin, full, { encoding: "utf8" });
-  if (r.status !== 0) die(`esbuild failed:\n${r.stderr || r.stdout}`);
-  return r.stdout;
+  return { ok: r.status === 0, stderr: r.stderr || "", stdout: r.stdout || "" };
+}
+
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+// Which symbol to import for a component: an explicit config `export`, else
+// `default` if present, else a named export matching the component name. null if
+// none — the component is skipped with a clear reason (it may not be a component).
+function exportSymbol(cfg, comp, src) {
+  if (comp.export) return comp.export;
+  if (/export\s+default/.test(src)) return "default";
+  if (new RegExp(`export\\s+(?:async\\s+)?(?:function|const|class)\\s+${escapeRe(comp.name)}\\b`).test(src))
+    return comp.name;
+  return null;
+}
+
+function listExports(src) {
+  const names = new Set();
+  if (/export\s+default/.test(src)) names.add("default");
+  for (const m of src.matchAll(/export\s+(?:async\s+)?(?:function|const|class)\s+([A-Za-z0-9_$]+)/g)) names.add(m[1]);
+  for (const m of src.matchAll(/export\s*\{([^}]*)\}/g))
+    m[1].split(",").forEach((s) => { const n = s.trim().split(/\s+as\s+/).pop().trim(); if (n) names.add(n); });
+  return [...names];
+}
+
+// first non-empty line of esbuild's error block that mentions this component
+function errorFor(comp, stderr) {
+  const base = basename(comp.path);
+  const line = stderr.split("\n").find((l) => l.includes("ERROR") && (l.includes(base) || l.includes(comp.name)))
+    || stderr.split("\n").find((l) => l.includes(base));
+  return (line || "esbuild error").replace(/^.*?ERROR\]?\s*/, "").trim() || "esbuild error";
 }
 
 // A temp tsconfig so esbuild resolves the repo's path aliases (e.g. @/*).
@@ -110,38 +141,73 @@ function bundleHeader(cfg, comps) {
 function build(cfg, comps) {
   mkdirSync(cfg.outDir, { recursive: true });
   const tsconfig = writeTsconfig(cfg);
-  // temp entry: import every component, attach to window.<namespace>.<Name>
   const entry = join(cfg.outDir, ".dck-entry.jsx");
-  const imports = comps
-    .map((c, i) => `import C${i} from ${JSON.stringify(toAlias(cfg, c.path))};`)
-    .join("\n");
-  const attach = comps.map((c, i) => `__ds_ns[${JSON.stringify(c.name)}] = C${i};`).join("\n");
-  writeFileSync(
-    entry,
-    `import React from "react";\n${imports}\n` +
-      `const __ds_ns = (window.${cfg.namespace} = window.${cfg.namespace} || {});\n` +
-      `(__ds_ns.__errors = __ds_ns.__errors || []);\n__ds_ns.React = React;\n${attach}\n`,
-  );
+  const cleanup = () => [entry, tsconfig].forEach((f) => existsSync(f) && rmSync(f));
+  const failed = [];
+
+  // 1. resolve each component's export symbol up front; unresolvable → skipped
+  let pending = [];
+  for (const c of comps) {
+    const abs = resolve(cfg.repoRoot, c.path);
+    if (!existsSync(abs)) { failed.push({ name: c.name, reason: `file not found: ${c.path}` }); continue; }
+    const src = readFileSync(abs, "utf8");
+    const sym = exportSymbol(cfg, c, src);
+    if (!sym) {
+      failed.push({ name: c.name, reason: `no usable export (found: ${listExports(src).join(", ") || "none"}). Add "export":"<name>", or it isn't a component.` });
+      continue;
+    }
+    pending.push({ ...c, sym });
+  }
 
   const aliasFlags = [
     `--alias:next/link=${join(cfg.shimsDir, "next-link.jsx")}`,
     `--alias:next/image=${join(cfg.shimsDir, "next-image.jsx")}`,
     `--alias:next/navigation=${join(cfg.shimsDir, "next-navigation.js")}`,
   ];
-  esbuild([
-    entry,
-    "--bundle",
-    "--format=iife",
-    "--jsx=automatic",
-    `--tsconfig=${tsconfig}`,
-    ...aliasFlags,
-    `--banner:js=${bundleHeader(cfg, comps)}`,
-    `--outfile=${join(cfg.outDir, "_ds_bundle.js")}`,
-  ]);
-  rmSync(entry);
-  rmSync(tsconfig);
-  console.log(`✓ built _ds_bundle.js + _ds_bundle.css  (${comps.map((c) => c.name).join(", ")})`);
-  console.log(`  → ${cfg.outDir}`);
+  const writeEntry = (list) => {
+    const imports = list
+      .map((c, i) => c.sym === "default"
+        ? `import C${i} from ${JSON.stringify(toAlias(cfg, c.path))};`
+        : `import { ${c.sym} as C${i} } from ${JSON.stringify(toAlias(cfg, c.path))};`)
+      .join("\n");
+    const attach = list.map((c, i) => `__ds_ns[${JSON.stringify(c.name)}] = C${i};`).join("\n");
+    writeFileSync(
+      entry,
+      `import React from "react";\n${imports}\n` +
+        `const __ds_ns = (window.${cfg.namespace} = window.${cfg.namespace} || {});\n` +
+        `(__ds_ns.__errors = __ds_ns.__errors || []);\n__ds_ns.React = React;\n${attach}\n`,
+    );
+  };
+
+  // 2. build; on failure, evict the offending component(s) and retry
+  while (pending.length) {
+    writeEntry(pending);
+    const r = runEsbuild(cfg, [
+      entry, "--bundle", "--format=iife", "--jsx=automatic",
+      `--tsconfig=${tsconfig}`, ...aliasFlags,
+      `--banner:js=${bundleHeader(cfg, pending)}`,
+      `--outfile=${join(cfg.outDir, "_ds_bundle.js")}`,
+    ]);
+    if (r.ok) break;
+    const culprits = pending.filter((c) => r.stderr.includes(basename(c.path)) || r.stderr.includes(c.name));
+    if (!culprits.length) { cleanup(); die(`esbuild error not attributable to a component:\n${r.stderr}`); }
+    for (const c of culprits) failed.push({ name: c.name, reason: errorFor(c, r.stderr) });
+    pending = pending.filter((c) => !culprits.includes(c));
+  }
+  cleanup();
+
+  // 3. report
+  if (pending.length) {
+    console.log(`✓ built _ds_bundle.js + _ds_bundle.css  →  ${cfg.outDir}`);
+    console.log(`  ${pending.length} component(s): ${pending.map((c) => c.name).join(", ")}`);
+  } else {
+    console.log(`✗ no components built.`);
+  }
+  if (failed.length) {
+    console.log(`\n⚠ ${failed.length} skipped:`);
+    for (const f of failed) console.log(`  · ${f.name} — ${f.reason}`);
+  }
+  if (!pending.length) process.exit(1);
 }
 
 // repo-relative path → alias path if it lives under an aliased root, else abs
@@ -176,9 +242,10 @@ function scaffold(cfg, comp) {
   const map = cssClassMap(cfg, comp);
   const stylesDecl = map
     ? `const styles = ${JSON.stringify(map, null, 2)};\n`
-    : `// No CSS module detected on the source — style with var(--*) tokens inline.\n`;
+    : `const styles = {}; // no CSS module on the source — style with var(--*) tokens inline.\n`;
+  const firstClass = map ? Object.keys(map)[0] : null;
 
-  writeMissing(join(dir, `${comp.name}.jsx`), jsxTemplate(cfg, comp, stylesDecl));
+  writeMissing(join(dir, `${comp.name}.jsx`), jsxTemplate(cfg, comp, stylesDecl, firstClass));
   writeMissing(join(dir, `${comp.name}.d.ts`), dtsTemplate(comp));
   writeMissing(join(dir, `${comp.name}.prompt.md`), promptTemplate(comp));
   writeMissing(join(dir, `${comp.name}.html`), cardTemplate(comp));
@@ -194,7 +261,7 @@ function writeMissing(path, content) {
   writeFileSync(path, content);
 }
 
-const jsxTemplate = (cfg, comp, stylesDecl) => `// ${comp.name} — scaffolded by ds-component-kit. SELF-CONTAINED SOURCE.
+const jsxTemplate = (cfg, comp, stylesDecl, firstClass) => `// ${comp.name} — scaffolded by ds-component-kit. SELF-CONTAINED SOURCE.
 // TODO(human/AI): make this standalone for the design runtime —
 //   1. inline any helpers imported from app libs (no @/lib imports),
 //   2. replace next/link with <a>, next/image with <img>,
@@ -205,11 +272,9 @@ import React from "react";
 ${stylesDecl}
 export default function ${comp.name}(props) {
   // TODO: paste the component body from ${comp.path}, adapted per the notes above.
-  return <div className={styles?.${firstKey(comp)} ?? ""}>${comp.name} — TODO</div>;
+  return <div className={styles${firstClass ? `.${firstClass}` : '[""]'}}>${comp.name} — TODO</div>;
 }
 `;
-
-const firstKey = () => "root";
 
 const dtsTemplate = (comp) => `// Type contract for ${comp.name} — scaffolded by ds-component-kit.
 // TODO(human/AI): fill in the real prop + data types (mirror the repo's lib types).
@@ -298,12 +363,20 @@ let cfg;
 switch (cmd) {
   case "init":
     init(flags); break;
-  case "build":
-    cfg = loadConfig(flags); build(cfg, pickComponents(cfg, flags, pos)); break;
-  case "scaffold":
+  case "build": {
     cfg = loadConfig(flags);
-    for (const c of pickComponents(cfg, flags, pos)) scaffold(cfg, c);
+    const sel = pickComponents(cfg, flags, pos);
+    if (!sel.length) die(`no components selected${flags.only ? ` matching --only ${flags.only}` : ""}. Check ds-component-kit.config.json.`);
+    build(cfg, sel);
     break;
+  }
+  case "scaffold": {
+    cfg = loadConfig(flags);
+    const sel = pickComponents(cfg, flags, pos);
+    if (!sel.length) die(`no components selected${flags.only ? ` matching --only ${flags.only}` : ""}. Check ds-component-kit.config.json.`);
+    for (const c of sel) scaffold(cfg, c);
+    break;
+  }
   case "serve":
     cfg = loadConfig(flags); serve(cfg, flags); break;
   default:

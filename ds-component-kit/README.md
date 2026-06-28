@@ -56,6 +56,19 @@ from your project after a first sync.
 
 Ad-hoc, no config: `node ds-component-kit.mjs build src/components/X.tsx --name X --group Cards`.
 
+### Export style & resilience
+- **Default vs named exports** are auto-detected: `export default`, else a named
+  export matching the component `name`. For anything else (a differently-named
+  export, or a re-export), set `"export": "<name>"` on the component's config entry.
+- **`build` is resilient.** Components that can't resolve an export, or that fail
+  to compile (e.g. they pull in an unshimmed dependency), are **skipped with a
+  one-line reason** — the rest still build into the bundle. A component that turns
+  out to be a hook or provider rather than a renderable view surfaces here:
+  ```
+  ⚠ 1 skipped:
+    · Dialog — no usable export (found: useDialogs, DialogProvider). Add "export":"<name>", or it isn't a component.
+  ```
+
 ## What you still author (the honest part)
 The kit cannot invent these — they need judgment:
 1. **`<Name>.jsx` body** — paste the component, inline app-lib helpers, swap
