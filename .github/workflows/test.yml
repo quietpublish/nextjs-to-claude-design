@@ -18,6 +18,10 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
       - run: npm ci
+      - uses: browser-actions/setup-chrome@v1
+        id: chrome
       - run: npm test
-        # The `verify` test self-skips when no Chrome is present (as on CI);
-        # unit + build + scaffold tests run on every matrix node.
+        # Chrome is installed so the headless `verify` tests run too (they
+        # self-skip only when no Chrome is present).
+        env:
+          CHROME: ${{ steps.chrome.outputs.chrome-path }}

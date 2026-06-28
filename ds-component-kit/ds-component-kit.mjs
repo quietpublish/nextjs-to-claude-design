@@ -200,6 +200,7 @@ const aliasFlags = (cfg) => [
   `--alias:next/link=${join(cfg.shimsDir, "next-link.jsx")}`,
   `--alias:next/image=${join(cfg.shimsDir, "next-image.jsx")}`,
   `--alias:next/navigation=${join(cfg.shimsDir, "next-navigation.js")}`,
+  `--alias:next/dynamic=${join(cfg.shimsDir, "next-dynamic.js")}`,
 ];
 
 async function build(cfg, comps, flags = {}) {
