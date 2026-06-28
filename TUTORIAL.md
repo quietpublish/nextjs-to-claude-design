@@ -58,23 +58,22 @@ canvas, click the design-system selector above the prompt and choose your system
 
 ## Part B — Components (the optional, bigger lift)
 
-> **Before you start, know the tradeoff:** each synced component is a
-> self-contained *copy* of an app view with no link back — when the app changes,
-> the design-system twin drifts silently. Tokens (Part A) don't drift; components
-> do. Be deliberate — sync the stable, reused components; let fast-moving views
-> stay app-only. Keep the authored sources in a **committed source dir** (separate
-> from the generated bundle) so the fork is at least version-controlled. See
-> [the write-up](./POST.md#the-honest-tradeoff-your-components-become-a-fork).
+> **The rule that avoids the drift trap:** never hand-copy a component. *Generate*
+> it from the real app source so it's a build artifact, not a fork — change the app,
+> re-generate. The kit's `generate` does this for the prop-driven majority; the few
+> data-coupled views that can't be generated stay hand-authored and are guarded by
+> the `drift` check. See [the write-up](./POST.md#the-drift-trap--and-how-to-avoid-it).
 
 ### B1. Triage which components can sync
-Only client-renderable, prop-driven components qualify. Find the clean set:
+Only client-renderable, prop-driven components generate cleanly. Find the clean set:
 ```bash
 # components that DON'T fetch/route internally (the easy wins)
 comm -23 <(find src -name '*.tsx' | sort) \
         <(grep -rlE "fetch\(|/api/|next/navigation|next/headers" src --include='*.tsx' | sort)
 ```
-Components that fetch internally need their data **lifted to props** first (a
-source refactor). Route files (`page.tsx`/`layout.tsx`) are not components.
+Components that fetch internally need their data **lifted to props** first (a source
+refactor), or they stay hand-authored. Route files (`page.tsx`/`layout.tsx`) aren't
+components.
 
 ### B2. Configure ds-component-kit
 ```bash
@@ -82,70 +81,76 @@ cd ds-component-kit
 node ds-component-kit.mjs init
 $EDITOR ds-component-kit.config.json
 ```
-Set `repoRoot`, your `srcAlias` (from tsconfig `paths`), the `namespace` (the one
-your project already uses — copy it after a first sync), and list `components[]`
-with `path` / `name` / `group`. See `ds-component-kit.config.example.json`.
+Set `repoRoot`, your `srcAlias` (from tsconfig `paths`), and the `namespace` (copy it
+from your project after a first sync). For each component give `name`, `group`,
+`path` (where the generated `.jsx` lives, e.g. `design-system/components/<Group>/<Name>/<Name>.jsx`),
+and `appPath` (the real app source it's generated from). **Omit `appPath` for a
+component you intend to hand-author** — `generate` skips it and `drift` marks it
+`manual`.
 
-### B3. Build the render-verification bundle
+### B3. Generate the components from source
 ```bash
-node ds-component-kit.mjs build --only YourComponent
+node ds-component-kit.mjs generate          # all; or --only YourComponent
 ```
-This esbuilds the component with `next/*` shimmed and your aliases resolved into
-`ds-bundle/_ds_bundle.js` + `_ds_bundle.css`. Wire the CSS into the closure:
+Each `appPath` `.tsx` is bundled into a self-contained `.jsx` at its `path`: app-lib
+helpers inlined, `next/*` shimmed, the CSS-module import turned into a scoped class
+map, npm deps left as bare imports. The output is generated — **don't edit it**;
+re-run `generate` when the app changes. `generate` also fingerprints each source into
+`.dck-sync.json` (the `drift` baseline).
+
+### B4. Build the bundle + compile CSS
+```bash
+node ds-component-kit.mjs build --js-only   # bundle the generated .jsx → _ds_bundle.js
+node ds-component-kit.mjs build --css-only --config <appsrc>   # compile _ds_bundle.css from app CSS modules
+```
+Wire the component CSS into the design closure:
 ```css
 /* styles.css */
 @import "./_ds_bundle.css";
 ```
 
-### B4. Render-check it locally
-Fastest path — author the component's `fixture.mjs` (see B5), then let the kit
-headless-render it and classify ok/blank/error:
+### B5. Render-check it
 ```bash
-node ds-component-kit.mjs verify --only YourComponent
+node ds-component-kit.mjs verify            # headless-render each component + fixture
 ```
-`ok` means it rendered; `blank` usually means the fixture is too thin; `error`
-prints the thrown message (and exits non-zero, so this works in CI). For a visual
-check, also `serve` and open a harness:
-```bash
-node ds-component-kit.mjs serve            # static-serves ds-bundle/
-```
-Copy `templates/render-harness.html` to `ds-bundle/render.html`, set the namespace
-+ component + fixture import, and open it. Confirm it's pixel-faithful with a clean
-console **before** uploading — fidelity here is fidelity in every design the agent
-builds.
+`ok` rendered; `blank` = the fixture is too thin; `error` prints the thrown message
+and exits non-zero (CI-friendly). `verify` reads each component's `fixture.mjs` — see
+B6. For a visual pass, `serve` and open `templates/render-harness.html`.
 
-> Tip: to capture a publishable screenshot, bundle React + ReactDOM + the
-> component into one self-contained file and shoot it with headless Chrome
+> Tip: to capture a publishable screenshot, bundle React + ReactDOM + the component
+> into one self-contained file and shoot it with headless Chrome
 > (`--headless=new --screenshot --virtual-time-budget=5000`). esm.sh import maps
 > don't resolve in headless; a self-contained bundle does.
 
-### B5. Scaffold the component directory
+### B6. Author the metadata (the irreducible hand parts)
+`generate` produces the `.jsx`; the rest of each component dir is authored once.
+`scaffold` stubs them:
 ```bash
-node ds-component-kit.mjs scaffold --only YourComponent
+node ds-component-kit.mjs scaffold --only YourComponent   # never clobbers edited files
 ```
-Creates `ds-bundle/components/<Group>/<Name>/` with five files; the CSS-module
-class map is pre-extracted into the `.jsx`. Now finish the `TODO(human/AI)` parts:
-1. **`<Name>.jsx`** — paste the body, inline app-lib helpers, `next/link`→`<a>`.
-2. **`<Name>.d.ts`** — the real prop/data types.
-3. **`<Name>.prompt.md`** — usage prose (states, props, don'ts).
-4. **`<Name>.html`** — a static preview thumbnail in your tokens.
-5. **`fixture.mjs`** — realistic props (you already have this from B4).
+- **`<Name>.d.ts`** — the prop/data contract the design agent codes against.
+- **`<Name>.prompt.md`** — usage prose (states, props, don'ts).
+- **`<Name>.html`** — a static preview thumbnail; its first line registers the card:
+  ```html
+  <!-- @dsCard group="Cards" name="YourComponent" subtitle="…" viewport="760x420" -->
+  ```
+- **`fixture.mjs`** — realistic props for `verify`.
 
-The `@dsCard` first line is what registers the card:
-```html
-<!-- @dsCard group="Cards" name="YourComponent" subtitle="…" viewport="760x420" -->
+These are metadata, not the implementation — small, and the only thing you maintain
+by hand. Commit the whole component source dir.
+
+### B7. Upload, then guard against drift
+Upload with `/design-sync`, then **open the project** so it re-indexes — uploading
+alone isn't enough for the component to appear. It shows under its group with its
+card, types, and usage notes.
+
+Then keep it honest: commit `.dck-sync.json` and run drift on every change —
+```bash
+node ds-component-kit.mjs drift             # fresh / drifted / unsealed / manual / orphan
 ```
-
-### B6. Upload and verify
-Upload the new files with `/design-sync`, then **open the project** so it
-re-indexes — uploading alone isn't enough to make the component appear. Your
-component shows under its group, with its card, type contract, and usage notes.
-Click it to confirm.
-
-### B7. Repeat / scale
-Repeat B3–B6 per component. Re-running `scaffold` never clobbers files you've
-edited. For a large set, parallelize the authoring — the recipe is fixed; only
-the per-component judgment varies.
+Wire it into CI so a PR that changes an app view but forgets to re-`generate` goes
+red (the kit ships a sample GitHub Actions workflow). Fix a drift by re-running
+`generate` → `build --js-only` → re-upload.
 
 ---
 

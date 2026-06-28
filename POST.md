@@ -147,35 +147,43 @@ Next imports), real `.d.ts` types, the usage prose, a preview card, and a
 fixture. For data-fetching views, add a refactor to lift data to props. That's
 the real budget — not the bundling.
 
-## The honest tradeoff: your components become a fork
+## The drift trap — and how to avoid it
 
-This is the part to go in with eyes open. Each synced component is a
-**self-contained copy** of an app view, with **no link back** to the original. When
-the app view changes, its design-system twin goes stale — silently. That's not a
-flaw in the approach; it's the inherent tax of syncing an *application* instead of
-a component library. A library has one canonical component; an app has the view
-*and* its design-system projection, and they drift.
+The obvious way to do this — hand-author a self-contained copy of each app view —
+walks straight into a trap: the copy has **no link back** to the original, so when
+the app view changes, its design-system twin goes stale, silently. A library has
+one canonical component; an app that's been *copied* into a design system has the
+view *and* a frozen projection of it, and they drift apart.
 
-So the durable split is:
+The fix is to never hand-copy. **Generate the design-system component from the real
+app source**, deterministically, every sync — so it's a build artifact, not a fork:
 
-- **Tokens, fonts, conventions** are auto-derived from your global stylesheet.
-  They don't drift. This is most of the value — the design agent produces
-  on-brand screens from this layer alone. Sync it and you're done for most teams.
-- **Components are a maintained fork.** Keep the handful that are genuinely stable
-  and reused; treat fast-moving, data-dense views as "great for populating the
-  system today, accept they'll bit-rot." Maintaining all of them in lockstep with
-  the app is real recurring work — be deliberate, not completist.
+- `ds-component-kit generate` bundles each real app `.tsx` into a self-contained
+  `.jsx` (inlines app-lib helpers, shims `next/*`, turns the CSS-module import into
+  a scoped class map, leaves npm deps as bare imports). The component can't drift
+  because it's never edited — change the app, re-run `generate`.
+- This works cleanly for the **presentational majority** (components that take their
+  data as props). The split that makes it possible is one most app codebases already
+  have: a container does the fetching/routing and passes data down. Those leaf views
+  generate one-to-one from source.
+- The exception is a view still wired to its own data loading (e.g. a tab shell whose
+  children fetch). Keep those hand-authored — and catch them with `ds-component-kit
+  drift`, a CI check that hashes each component's app source and fails the build when
+  it changed since the last `generate`. Silent rot becomes a red check.
 
-A good mitigation: a CI check that flags when a component's app source has changed
-since the last sync, turning silent drift into a visible nudge to re-author.
+So the durable picture: **tokens/fonts/conventions** are auto-derived from the global
+stylesheet and never drift; **components** are generated from app source (no fork) for
+the prop-driven set, with drift-detection guarding the handful that stay manual.
 
 ## The tool
 
-[`ds-component-kit`](./ds-component-kit/) generalizes the harness: a config-driven
-CLI that does the deterministic parts (build the bundle, shim Next, resolve
-aliases, scaffold the component directory with the CSS-module class map
-pre-extracted) and leaves clearly-marked `TODO(human/AI)` stubs for the parts
-that need judgment. The [tutorial](./TUTORIAL.md) walks it end to end.
+[`ds-component-kit`](./ds-component-kit/) is a config-driven CLI for the whole
+loop: `generate` (produce each component `.jsx` from real app source — no fork),
+`build` (bundle + compile CSS), `verify` (headless-render each component with a
+fixture; ok/blank/error), `drift` (flag components whose app source changed since
+`generate`), and `scaffold` (stub a new component's metadata). It shims Next,
+resolves your path aliases, and turns CSS modules into scoped class maps for you.
+The [tutorial](./TUTORIAL.md) walks it end to end.
 
 ## Takeaways if you have a similar stack
 
@@ -184,8 +192,11 @@ that need judgment. The [tutorial](./TUTORIAL.md) walks it end to end.
 - **The upload format is the contract, not the converter.** An app can produce it.
 - **Components live in `components/<Group>/<Name>/` directories**; the `.html`'s
   `@dsCard` line is the card; the project re-indexes on open.
+- **Generate, don't copy.** Hand-authored component copies drift; generating them
+  from app source makes them a build artifact that can't. Guard the rest with a
+  drift check.
 - **Bundling is easy; data-decoupling is the work.** Presentational components
-  port cleanly; data-fetching views need a refactor first.
+  generate cleanly; data-fetching views need their data lifted to props first.
 - **Name real things in your conventions** — agents act on specifics, not vibes —
   and validate every name against the build.
 

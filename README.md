@@ -29,8 +29,9 @@ repo documents how to bridge that gap, and ships a small tool to do it.
    real tokens, upload with `/design-sync`, and publish. For many teams this is
    the whole job.
 2. **Components, if you want them.** Only client-renderable, prop-driven ones
-   qualify. Build + render-check with the kit, then author the self-contained
-   source, types, usage notes, preview card, and fixture per component.
+   qualify. **Generate** each component from its real app source (so it's a build
+   artifact, not a fork), then author just the metadata (types, usage notes, preview
+   card, fixture) per component. A `drift` check + CI catch any forgotten re-sync.
 
 A real application view, rendered standalone from the bundle:
 
@@ -41,9 +42,11 @@ A real application view, rendered standalone from the bundle:
 ```bash
 cd ds-component-kit
 node ds-component-kit.mjs init
-$EDITOR ds-component-kit.config.json
-node ds-component-kit.mjs build
-node ds-component-kit.mjs scaffold
+$EDITOR ds-component-kit.config.json   # set components[] with path + appPath
+node ds-component-kit.mjs generate     # component .jsx from real app source (no fork)
+node ds-component-kit.mjs build        # bundle + compile CSS
+node ds-component-kit.mjs verify       # headless render check (ok/blank/error)
+node ds-component-kit.mjs drift        # guard: app source changed since generate?
 ```
 
 See [ds-component-kit/README.md](./ds-component-kit/README.md) for the full

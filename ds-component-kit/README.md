@@ -50,12 +50,22 @@ from your project after a first sync.
 | Command | What it does | Automated? |
 |---|---|---|
 | `init` | write a config template | ✅ |
-| `build [--only A,B]` | esbuild the component(s) → `_ds_bundle.js` + `_ds_bundle.css`, with `next/*` shimmed, your path aliases resolved, React inlined | ✅ fully |
-| `scaffold [--only A,B]` | create `components/<Group>/<Name>/` with the 5 files; auto-extracts the CSS-module class map into the `.jsx` | ⚠️ stubs + TODOs |
-| `verify [--only A,B]` | headless-render each component with its `fixture.mjs`; report **ok / blank / error** per component (exit 1 on any error) | ✅ |
+| `generate [--only A,B]` | produce each component `.jsx` from its real app source (`appPath`) — inline app-lib, shim `next/*`, CSS-module → scoped class map, npm deps bare. The `.jsx` is a build artifact, **not a fork** | ✅ fully |
+| `drift [--only A,B]` | flag components whose app source changed since the last `generate` (**fresh / drifted / unsealed / manual / orphan**; exit 1 on drift) | ✅ |
+| `build [--only A,B]` | esbuild → `_ds_bundle.js` + `_ds_bundle.css` (`--js-only` / `--css-only` to publish one without clobbering the other) | ✅ fully |
+| `scaffold [--only A,B]` | stub `components/<Group>/<Name>/` metadata (`.d.ts`/`.prompt.md`/`.html`/`fixture.mjs`) with the CSS-module class map pre-extracted | ⚠️ stubs + TODOs |
+| `verify [--only A,B]` | headless-render each component with its `fixture.mjs`; **ok / blank / error** (exit 1 on any error) | ✅ |
 | `serve [--port]` | static-serve `outDir` for a browser render check | ✅ |
 
 Ad-hoc, no config: `node ds-component-kit.mjs build src/components/X.tsx --name X --group Cards`.
+
+### Generate, don't fork
+Set both `path` (where the generated `.jsx` lives) and `appPath` (the real source)
+on each component, then `generate` keeps the `.jsx` a deterministic artifact of the
+app — change the app, re-`generate`, no drift. **Omit `appPath`** for a component you
+must hand-author (e.g. one still wired to its own data fetching); `generate` skips
+it and `drift` marks it `manual`. `generate` fingerprints sources into
+`.dck-sync.json` (commit it) so `drift` — and CI — can catch a forgotten re-sync.
 
 ### Export style & resilience
 - **Default vs named exports** are auto-detected: `export default`, else a named
@@ -92,26 +102,27 @@ fixture). Because it exits non-zero on any error, it's CI-friendly.
 Output is colorized in a terminal (TTY); set `NO_COLOR=1` (or pipe to a file) for
 plain text. The slow steps show a spinner while esbuild / headless Chrome run.
 
-## What you still author (the honest part)
-The kit cannot invent these — they need judgment:
-1. **`<Name>.jsx` body** — paste the component, inline app-lib helpers, swap
-   `next/link`→`<a>` / `next/image`→`<img>`. The class-name map is pre-filled.
-2. **`<Name>.d.ts`** — the real prop/data types.
-3. **`<Name>.prompt.md`** — the usage prose the design agent reads.
-4. **`<Name>.html`** — a static preview thumbnail (your tokens) with a `@dsCard` first line.
-5. **`fixture.mjs`** — realistic props for the local render check.
+## Generated vs authored
+- **`<Name>.jsx` is generated** by `generate` from the app source — don't edit it
+  (re-run `generate` instead). For a component you must hand-author, omit `appPath`.
+- **You author the metadata** (the kit can't invent these — they need judgment):
+  1. **`<Name>.d.ts`** — the real prop/data types.
+  2. **`<Name>.prompt.md`** — the usage prose the design agent reads.
+  3. **`<Name>.html`** — a static preview thumbnail (your tokens) with a `@dsCard` first line.
+  4. **`fixture.mjs`** — realistic props for the local render check.
 
-Every stub is marked `TODO(human/AI)`. Re-running `scaffold` never overwrites a
-file you've edited.
+`scaffold` stubs the metadata (marked `TODO(human/AI)`) and never overwrites a file
+you've edited. The metadata is small and stable; the implementation comes from source.
 
 ## How a component is laid out
 A design system reads components from a per-component directory:
 ```
 components/<Group>/<Name>/
-  <Name>.jsx        self-contained source
+  <Name>.jsx        generated from app source (not hand-edited)
   <Name>.d.ts       the type contract
   <Name>.prompt.md  usage notes for the agent
   <Name>.html       static preview card (first line: <!-- @dsCard … -->)
+  fixture.mjs       props for the local render check
 ```
 Component CSS (`_ds_bundle.css`) must be reachable from your `styles.css`'s
 `@import` closure so rendered designs receive it. After uploading, **open the
