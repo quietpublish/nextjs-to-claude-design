@@ -90,6 +90,14 @@ This esbuilds the component with `next/*` shimmed and your aliases resolved into
 ```
 
 ### B4. Render-check it locally
+Fastest path — author the component's `fixture.mjs` (see B5), then let the kit
+headless-render it and classify ok/blank/error:
+```bash
+node ds-component-kit.mjs verify --only YourComponent
+```
+`ok` means it rendered; `blank` usually means the fixture is too thin; `error`
+prints the thrown message (and exits non-zero, so this works in CI). For a visual
+check, also `serve` and open a harness:
 ```bash
 node ds-component-kit.mjs serve            # static-serves ds-bundle/
 ```

@@ -340,6 +340,96 @@ function serve(cfg, flags) {
   });
 }
 
+// ---------- verify (headless render check) ----------------------------------
+// Renders each component (real source + its fixture) in headless Chrome and
+// flags blanks/errors — the automated half of "does it actually render?".
+function findChrome(flags) {
+  const cands = [
+    flags.chrome, process.env.CHROME,
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+  ].filter(Boolean);
+  for (const c of cands) if (existsSync(c)) return c;
+  for (const name of ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "chrome"]) {
+    const r = spawnSync("which", [name], { encoding: "utf8" });
+    if (r.status === 0 && r.stdout.trim()) return r.stdout.trim();
+  }
+  return null;
+}
+
+function verify(cfg, comps, flags) {
+  const chrome = findChrome(flags);
+  if (!chrome) die(`no Chrome/Chromium found. Set CHROME=<path> or pass --chrome <path>.`);
+  mkdirSync(cfg.outDir, { recursive: true });
+  const tsconfig = writeTsconfig(cfg);
+  const entry = join(cfg.outDir, ".dck-verify.jsx");
+  const html = join(cfg.outDir, ".dck-verify.html");
+  const js = join(cfg.outDir, ".dck-verify.js");
+  const keep = !!flags.keep;
+  const cleanup = () => { if (!keep) [entry, tsconfig, html, js, js.replace(/\.js$/, ".css")].forEach((f) => existsSync(f) && rmSync(f)); };
+
+  // components that have an authored (or stub) fixture + a resolvable export
+  const runnable = [], skipped = [];
+  for (const c of comps) {
+    const abs = resolve(cfg.repoRoot, c.path);
+    const fix = join(cfg.outDir, "components", c.group, c.name, "fixture.mjs");
+    if (!existsSync(abs)) { skipped.push({ name: c.name, reason: "source not found" }); continue; }
+    if (!existsSync(fix)) { skipped.push({ name: c.name, reason: "no fixture.mjs (run scaffold, then author it)" }); continue; }
+    const sym = exportSymbol(cfg, c, readFileSync(abs, "utf8"));
+    if (!sym) { skipped.push({ name: c.name, reason: "no usable export" }); continue; }
+    runnable.push({ ...c, sym, fix });
+  }
+  if (!runnable.length) { cleanup(); console.log("✗ nothing to verify."); skipped.forEach((s) => console.log(`  · ${s.name} — ${s.reason}`)); process.exit(1); }
+
+  const imp = runnable.map((c, i) =>
+    (c.sym === "default" ? `import C${i} from ${JSON.stringify(toAlias(cfg, c.path))};`
+      : `import { ${c.sym} as C${i} } from ${JSON.stringify(toAlias(cfg, c.path))};`) +
+    `\nimport { props as P${i} } from ${JSON.stringify(c.fix)};`).join("\n");
+  const items = runnable.map((c, i) => `{ name: ${JSON.stringify(c.name)}, C: C${i}, props: P${i} }`).join(", ");
+  writeFileSync(entry,
+    `import React from "react";\nimport { createRoot } from "react-dom/client";\nimport { flushSync } from "react-dom";\n${imp}\n` +
+    `const items = [${items}];\nconst results = [];\n` +
+    `for (const it of items) {\n` +
+    `  const el = document.createElement("div"); document.body.appendChild(el);\n` +
+    `  let error = null;\n` +
+    `  const root = createRoot(el, { onUncaughtError: (e) => { error = String((e && e.message) || e); }, onCaughtError: (e) => { error = String((e && e.message) || e); } });\n` +
+    `  try { flushSync(() => root.render(React.createElement(it.C, it.props))); }\n` +
+    `  catch (e) { error = error || String((e && e.message) || e); }\n` +
+    `  const text = (el.textContent || "").trim();\n` +
+    `  results.push({ name: it.name, ok: !error && text.length > 0, len: text.length, error });\n` +
+    `}\n` +
+    `const pre = document.createElement("pre"); pre.id = "__results"; pre.textContent = btoa(unescape(encodeURIComponent(JSON.stringify(results)))); document.body.appendChild(pre);\n`);
+  writeFileSync(html, `<!DOCTYPE html><html><head><meta charset="utf-8"><link rel="stylesheet" href="./styles.css"><link rel="stylesheet" href="./.dck-verify.css"></head><body><script src="./.dck-verify.js"></script></body></html>`);
+
+  const aliasFlags = [
+    `--alias:next/link=${join(cfg.shimsDir, "next-link.jsx")}`,
+    `--alias:next/image=${join(cfg.shimsDir, "next-image.jsx")}`,
+    `--alias:next/navigation=${join(cfg.shimsDir, "next-navigation.js")}`,
+  ];
+  const b = runEsbuild(cfg, [entry, "--bundle", "--format=iife", "--jsx=automatic", `--tsconfig=${tsconfig}`, ...aliasFlags, `--outfile=${js}`]);
+  if (!b.ok) { cleanup(); die(`verify bundle failed:\n${b.stderr}`); }
+
+  const r = spawnSync(chrome, ["--headless=new", "--disable-gpu", "--no-sandbox", "--hide-scrollbars", "--virtual-time-budget=6000", "--dump-dom", `file://${html}`], { encoding: "utf8", maxBuffer: 1 << 27 });
+  cleanup();
+  const m = (r.stdout || "").match(/<pre id="__results">([^<]*)<\/pre>/);
+  if (!m) die(`could not read render results from headless Chrome.\n${(r.stderr || "").split("\n").slice(0, 5).join("\n")}`);
+  let results;
+  try { results = JSON.parse(Buffer.from(m[1], "base64").toString("utf8")); }
+  catch { die(`could not parse render results.`); }
+
+  let okN = 0, blankN = 0, errN = 0;
+  console.log(`render check (headless):`);
+  for (const res of results) {
+    if (res.error) { errN++; console.log(`  ✗ ${res.name} — ERROR: ${res.error}`); }
+    else if (!res.ok) { blankN++; console.log(`  ⚠ ${res.name} — BLANK (rendered no text; check the fixture)`); }
+    else { okN++; console.log(`  ✓ ${res.name} — ok (${res.len} chars)`); }
+  }
+  if (skipped.length) { console.log(`  skipped:`); skipped.forEach((s) => console.log(`    · ${s.name} — ${s.reason}`)); }
+  console.log(`\n${okN} ok · ${blankN} blank · ${errN} error · ${skipped.length} skipped`);
+  if (errN > 0) process.exit(1);
+}
+
 // ---------- init -------------------------------------------------------------
 function init(flags) {
   const path = resolve(flags.config || join(process.cwd(), "ds-component-kit.config.json"));
@@ -377,6 +467,13 @@ switch (cmd) {
     for (const c of sel) scaffold(cfg, c);
     break;
   }
+  case "verify": {
+    cfg = loadConfig(flags);
+    const sel = pickComponents(cfg, flags, pos);
+    if (!sel.length) die(`no components selected${flags.only ? ` matching --only ${flags.only}` : ""}. Check ds-component-kit.config.json.`);
+    verify(cfg, sel, flags);
+    break;
+  }
   case "serve":
     cfg = loadConfig(flags); serve(cfg, flags); break;
   default:
@@ -386,10 +483,12 @@ Usage:
   ds-component-kit init                     write a config template
   ds-component-kit build   [--only A,B]     build _ds_bundle.js + .css (render-verify)
   ds-component-kit scaffold [--only A,B]    scaffold components/<Group>/<Name>/ artifacts
+  ds-component-kit verify  [--only A,B]     headless-render each component + fixture; flag blanks/errors
   ds-component-kit serve   [--port 8770]    static-serve the output dir for a render check
 
   ad-hoc (no config): ds-component-kit build src/app/X.tsx --name X --group Views
 
 Flags: --config <path>  --only <Name,Name>  --name <Name>  --group <Group>
+       --chrome <path>  (verify; or set CHROME=)   --keep (keep verify temp files)
 See README.md for the full workflow and the parts that need human authoring.`);
 }

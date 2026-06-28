@@ -52,6 +52,7 @@ from your project after a first sync.
 | `init` | write a config template | ✅ |
 | `build [--only A,B]` | esbuild the component(s) → `_ds_bundle.js` + `_ds_bundle.css`, with `next/*` shimmed, your path aliases resolved, React inlined | ✅ fully |
 | `scaffold [--only A,B]` | create `components/<Group>/<Name>/` with the 5 files; auto-extracts the CSS-module class map into the `.jsx` | ⚠️ stubs + TODOs |
+| `verify [--only A,B]` | headless-render each component with its `fixture.mjs`; report **ok / blank / error** per component (exit 1 on any error) | ✅ |
 | `serve [--port]` | static-serve `outDir` for a browser render check | ✅ |
 
 Ad-hoc, no config: `node ds-component-kit.mjs build src/components/X.tsx --name X --group Cards`.
@@ -68,6 +69,24 @@ Ad-hoc, no config: `node ds-component-kit.mjs build src/components/X.tsx --name 
   ⚠ 1 skipped:
     · Dialog — no usable export (found: useDialogs, DialogProvider). Add "export":"<name>", or it isn't a component.
   ```
+
+### Verifying renders
+`verify` renders each component (real source + its `fixture.mjs`) in **headless
+Chrome** and classifies the result:
+- **ok** — rendered visible text
+- **blank** — mounted but produced nothing (usually an empty/insufficient fixture)
+- **error** — threw during render (the message is shown; exit code is 1)
+
+It auto-finds Chrome/Chromium/Edge; override with `--chrome <path>` or `CHROME=`.
+Components without a `fixture.mjs` are skipped (run `scaffold`, then author the
+fixture). Because it exits non-zero on any error, it's CI-friendly.
+
+```
+render check (headless):
+  ✓ StatCard — ok (210 chars)
+  ⚠ EmptyState — BLANK (rendered no text; check the fixture)
+  ✗ Chart — ERROR: Cannot read properties of undefined (reading 'map')
+```
 
 ## What you still author (the honest part)
 The kit cannot invent these — they need judgment:
