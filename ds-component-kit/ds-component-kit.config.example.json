@@ -2,10 +2,10 @@
   "repoRoot": "..",
   "srcAlias": { "@/*": "src/*" },
   "namespace": "YourDesignSystem_xxxxxx",
-  "outDir": "../ds-bundle",
-  "shimsDir": "./shims",
+  "outDir": "../design-system",
   "components": [
-    { "path": "src/components/PriceTag.tsx", "name": "PriceTag", "group": "Atoms" },
-    { "path": "src/components/StatCard.tsx", "name": "StatCard", "group": "Cards" }
-  ]
+    { "name": "StatCard", "group": "Cards", "path": "design-system/components/Cards/StatCard/StatCard.jsx", "appPath": "src/components/StatCard.tsx" },
+    { "name": "PriceTag", "group": "Atoms", "path": "design-system/components/Atoms/PriceTag/PriceTag.jsx", "appPath": "src/components/PriceTag.tsx" }
+  ],
+  "_note": "path = generated artifact; appPath = real app source. Omit appPath to hand-author. shimsDir defaults to ./shims."
 }

@@ -22,14 +22,15 @@ app into an existing system you care about.
 
 ### A2. Produce the styling layer
 The runtime consumes one entry stylesheet and its `@import` closure. Mirror your
-token source into:
+token source into a **committed** `design-system/` directory (the kit's `outDir`):
 
 ```
-ds-bundle/
-  styles.css        @import fonts + tokens, then your base resets/helpers
+design-system/                      ← committed source-of-truth dir (the outDir)
+  styles.css        @import fonts + tokens + _ds_bundle.css, then base resets
   tokens/theme.css  :root { --bg: …; --card: …; --font-serif: …; --radius-lg: … }
   fonts/fonts.css   @import url('https://fonts.googleapis.com/css2?family=…')
   README.md         the conventions doc (see A3)
+  # later (Part B): components/**, _ds_bundle.css (committed); _ds_bundle.js (gitignored)
 ```
 
 `styles.css` starts with the imports (CSS requires `@import` before other rules):
@@ -48,9 +49,9 @@ idiomatic snippet. **Validate every name** against your token file before shippi
 (`grep`), or the agent will write vocabulary that doesn't resolve.
 
 ### A4. Upload + publish
-`/design-sync` uploads `ds-bundle/` into the project. Then **open the project and
-publish it** — an unpublished system won't appear in any canvas's picker. In your
-canvas, click the design-system selector above the prompt and choose your system.
+`/design-sync` uploads `design-system/` into the project. Then **open the project
+and publish it** — an unpublished system won't appear in any canvas's picker. In
+your canvas, click the design-system selector above the prompt and choose your system.
 
 ✅ The agent now designs on-brand. For many teams, this is the whole job.
 

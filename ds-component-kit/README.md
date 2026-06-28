@@ -23,11 +23,14 @@ parts that need a human (or an AI pair) to finish.
 ```bash
 cd ds-component-kit
 node ds-component-kit.mjs init          # writes ds-component-kit.config.json
-$EDITOR ds-component-kit.config.json    # set repoRoot, namespace, components[]
-node ds-component-kit.mjs build         # → _ds_bundle.js + _ds_bundle.css (render-verify)
-node ds-component-kit.mjs scaffold      # → components/<Group>/<Name>/{jsx,d.ts,prompt.md,html,fixture}
+$EDITOR ds-component-kit.config.json    # set namespace + components[] (path + appPath)
+node ds-component-kit.mjs generate      # component .jsx from real app source (no fork)
+node ds-component-kit.mjs build         # → _ds_bundle.js + _ds_bundle.css
+node ds-component-kit.mjs scaffold      # stub metadata: .d.ts / .prompt.md / .html / fixture.mjs
+node ds-component-kit.mjs verify        # headless render check (ok / blank / error)
+node ds-component-kit.mjs drift         # guard: app source changed since generate?
 ```
-Then finish the TODOs (below) and upload `outDir` into your design system with
+Finish the metadata TODOs (below) and upload `outDir` into your design system with
 `/design-sync`. A worked `ds-component-kit.config.example.json` is included.
 
 ## Config
@@ -36,15 +39,20 @@ Then finish the TODOs (below) and upload `outDir` into your design system with
   "repoRoot": "..",                     // repo root, relative to this config
   "srcAlias": { "@/*": "src/*" },       // your tsconfig path aliases
   "namespace": "YourDS_abc123",         // window.<namespace> the bundle attaches to
-  "outDir": "../ds-bundle",             // where artifacts are written
+  "outDir": "../design-system",         // committed source dir (see "Generated vs authored")
   "shimsDir": "./shims",                // next/* runtime shims (provided)
   "components": [
-    { "path": "src/components/StatCard.tsx", "name": "StatCard", "group": "Cards" }
+    // path = generated artifact; appPath = the real app source it's generated from
+    { "name": "StatCard", "group": "Cards",
+      "path": "design-system/components/Cards/StatCard/StatCard.jsx",
+      "appPath": "src/components/StatCard.tsx" }
   ]
 }
 ```
 The `namespace` matches the one your design-system project already uses — copy it
-from your project after a first sync.
+from your project after a first sync. `outDir` is a **committed** directory: its
+`components/**`, `_ds_bundle.css`, and `.dck-sync.json` are version-controlled;
+only the generated `_ds_bundle.js` is gitignored.
 
 ## Commands
 | Command | What it does | Automated? |
@@ -81,7 +89,7 @@ it and `drift` marks it `manual`. `generate` fingerprints sources into
   ```
 
 ### Verifying renders
-`verify` renders each component (real source + its `fixture.mjs`) in **headless
+`verify` renders each component (its generated `.jsx` + its `fixture.mjs`) in **headless
 Chrome** and classifies the result:
 - **ok** — rendered visible text
 - **blank** — mounted but produced nothing (usually an empty/insufficient fixture)
@@ -130,8 +138,12 @@ project once** so it re-indexes and the component appears.
 
 ## Limitations
 - Only handles components that can render client-side. Components that fetch data
-  internally must first have that data lifted to props (a source change).
-- `next/font`, `next/dynamic`, server-only APIs are not shimmed — keep those out
-  of synced components, or add shims under `shims/`.
-- The `.jsx` self-containment is yours to finish; the kit does the bundling,
-  class-map extraction, and layout — not the semantic rewrite.
+  internally must first have that data lifted to props — either as a source
+  refactor (then `generate`), or by keeping that component hand-authored (omit
+  `appPath`) and guarding it with `drift`.
+- Shimmed: `next/link`, `next/image`, `next/navigation`, `next/dynamic`. Not
+  shimmed: `next/font`, server-only APIs — keep those out of synced components, or
+  add a shim under `shims/`.
+- `generate` produces self-contained `.jsx`; what you author is the metadata
+  (`.d.ts` / `.prompt.md` / `.html` / `fixture.mjs`) — and the fixtures + preview
+  cards the kit can't invent.

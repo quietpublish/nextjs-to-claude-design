@@ -634,10 +634,12 @@ function init(flags) {
     repoRoot: "..",
     srcAlias: { "@/*": "src/*" },
     namespace: "YourDesignSystem_xxxxxx",
-    outDir: "../ds-bundle",
+    outDir: "../design-system",
     shimsDir: "./shims",
     components: [
-      { path: "src/app/SomeView.tsx", name: "SomeView", group: "Views" },
+      // path = the generated artifact; appPath = the real app source it's generated
+      // from. Omit appPath to hand-author a component instead of generating it.
+      { name: "SomeView", group: "Views", path: "design-system/components/Views/SomeView/SomeView.jsx", appPath: "src/app/SomeView.tsx" },
     ],
   }, null, 2));
   console.log(`  ${G.ok} wrote ${cyan(rel(path))}`);
