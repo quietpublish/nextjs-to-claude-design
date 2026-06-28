@@ -1,0 +1,11 @@
+{
+  "repoRoot": "..",
+  "srcAlias": { "@/*": "src/*" },
+  "namespace": "YourDesignSystem_xxxxxx",
+  "outDir": "../ds-bundle",
+  "shimsDir": "./shims",
+  "components": [
+    { "path": "src/components/PriceTag.tsx", "name": "PriceTag", "group": "Atoms" },
+    { "path": "src/components/StatCard.tsx", "name": "StatCard", "group": "Cards" }
+  ]
+}
