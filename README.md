@@ -1,6 +1,6 @@
 # Next.js → Claude Design
 
-[![tests](https://github.com/matt-wright86/nextjs-to-claude-design/actions/workflows/test.yml/badge.svg)](https://github.com/matt-wright86/nextjs-to-claude-design/actions/workflows/test.yml)
+[![tests](https://github.com/quietpublish/nextjs-to-claude-design/actions/workflows/test.yml/badge.svg)](https://github.com/quietpublish/nextjs-to-claude-design/actions/workflows/test.yml)
 &nbsp;![node](https://img.shields.io/badge/node-%E2%89%A518-339933)
 &nbsp;![license](https://img.shields.io/badge/license-MIT-blue)
 
