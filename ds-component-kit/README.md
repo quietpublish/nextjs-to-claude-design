@@ -66,8 +66,8 @@ Ad-hoc, no config: `node ds-component-kit.mjs build src/components/X.tsx --name 
   one-line reason** — the rest still build into the bundle. A component that turns
   out to be a hook or provider rather than a renderable view surfaces here:
   ```
-  ⚠ 1 skipped:
-    · Dialog — no usable export (found: useDialogs, DialogProvider). Add "export":"<name>", or it isn't a component.
+  1 skipped
+    ⚠ Dialog  no usable export (found: useDialogs, DialogProvider); set "export", or it isn't a component.
   ```
 
 ### Verifying renders
@@ -82,11 +82,15 @@ Components without a `fixture.mjs` are skipped (run `scaffold`, then author the
 fixture). Because it exits non-zero on any error, it's CI-friendly.
 
 ```
-render check (headless):
-  ✓ StatCard — ok (210 chars)
-  ⚠ EmptyState — BLANK (rendered no text; check the fixture)
-  ✗ Chart — ERROR: Cannot read properties of undefined (reading 'map')
+  ◆ ds-component-kit › verify  3 selected
+    ✓ StatCard      ok     210 chars
+    ⚠ EmptyState    blank  rendered no text — check the fixture
+    ✗ Chart         error  Cannot read properties of undefined (reading 'map')
+
+  1 ok · 1 blank · 1 error · 1.8s
 ```
+Output is colorized in a terminal (TTY); set `NO_COLOR=1` (or pipe to a file) for
+plain text. The slow steps show a spinner while esbuild / headless Chrome run.
 
 ## What you still author (the honest part)
 The kit cannot invent these — they need judgment:
