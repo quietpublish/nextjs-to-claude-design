@@ -147,6 +147,28 @@ Next imports), real `.d.ts` types, the usage prose, a preview card, and a
 fixture. For data-fetching views, add a refactor to lift data to props. That's
 the real budget — not the bundling.
 
+## The honest tradeoff: your components become a fork
+
+This is the part to go in with eyes open. Each synced component is a
+**self-contained copy** of an app view, with **no link back** to the original. When
+the app view changes, its design-system twin goes stale — silently. That's not a
+flaw in the approach; it's the inherent tax of syncing an *application* instead of
+a component library. A library has one canonical component; an app has the view
+*and* its design-system projection, and they drift.
+
+So the durable split is:
+
+- **Tokens, fonts, conventions** are auto-derived from your global stylesheet.
+  They don't drift. This is most of the value — the design agent produces
+  on-brand screens from this layer alone. Sync it and you're done for most teams.
+- **Components are a maintained fork.** Keep the handful that are genuinely stable
+  and reused; treat fast-moving, data-dense views as "great for populating the
+  system today, accept they'll bit-rot." Maintaining all of them in lockstep with
+  the app is real recurring work — be deliberate, not completist.
+
+A good mitigation: a CI check that flags when a component's app source has changed
+since the last sync, turning silent drift into a visible nudge to re-author.
+
 ## The tool
 
 [`ds-component-kit`](./ds-component-kit/) generalizes the harness: a config-driven

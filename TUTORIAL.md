@@ -58,6 +58,14 @@ canvas, click the design-system selector above the prompt and choose your system
 
 ## Part B — Components (the optional, bigger lift)
 
+> **Before you start, know the tradeoff:** each synced component is a
+> self-contained *copy* of an app view with no link back — when the app changes,
+> the design-system twin drifts silently. Tokens (Part A) don't drift; components
+> do. Be deliberate — sync the stable, reused components; let fast-moving views
+> stay app-only. Keep the authored sources in a **committed source dir** (separate
+> from the generated bundle) so the fork is at least version-controlled. See
+> [the write-up](./POST.md#the-honest-tradeoff-your-components-become-a-fork).
+
 ### B1. Triage which components can sync
 Only client-renderable, prop-driven components qualify. Find the clean set:
 ```bash

@@ -3,4 +3,5 @@ ds-bundle/
 ds-component-kit/ds-component-kit.config.json
 .DS_Store
 *.log
-.dck-tmp/
+.dck-tmp*
+.dck-gen*

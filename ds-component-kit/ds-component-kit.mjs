@@ -18,7 +18,7 @@
 //
 // Zero install: esbuild is run from node_modules/.bin if present, else via npx.
 
-import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync, statSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync, statSync, copyFileSync } from "node:fs";
 import { dirname, resolve, join, basename, relative } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
@@ -134,8 +134,11 @@ const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 function exportSymbol(cfg, comp, src) {
   if (comp.export) return comp.export;
   if (/export\s+default/.test(src)) return "default";
+  if (/export\s*\{[^}]*\bas\s+default\b/.test(src)) return "default"; // e.g. `export { X as default }` (generated)
   if (new RegExp(`export\\s+(?:async\\s+)?(?:function|const|class)\\s+${escapeRe(comp.name)}\\b`).test(src))
     return comp.name;
+  // a brace re-export exposing the component name → import it by that name
+  if (listExports(src).includes(comp.name)) return comp.name;
   return null;
 }
 
@@ -144,7 +147,7 @@ function listExports(src) {
   if (/export\s+default/.test(src)) names.add("default");
   for (const m of src.matchAll(/export\s+(?:async\s+)?(?:function|const|class)\s+([A-Za-z0-9_$]+)/g)) names.add(m[1]);
   for (const m of src.matchAll(/export\s*\{([^}]*)\}/g))
-    m[1].split(",").forEach((s) => { const n = s.trim().split(/\s+as\s+/).pop().trim(); if (n) names.add(n); });
+    m[1].split(",").forEach((s) => { const n = s.trim().split(/\s+as\s+/).pop().trim(); if (n) names.add(n); }); // exported (post-`as`) name
   return [...names];
 }
 
@@ -170,7 +173,8 @@ function writeTsconfig(cfg, dir) {
 
 // Transient build scratch under repoRoot, so esbuild resolves bare imports
 // (react, react-dom) from repoRoot/node_modules regardless of where outDir is.
-const tmpDir = (cfg) => { const d = join(cfg.repoRoot, ".dck-tmp"); mkdirSync(d, { recursive: true }); return d; };
+// Unique per process so concurrent builds (or parallel tests) don't collide.
+const tmpDir = (cfg) => { const d = join(cfg.repoRoot, `.dck-tmp-${process.pid}`); mkdirSync(d, { recursive: true }); return d; };
 
 function bundleHeader(cfg, comps) {
   return (
@@ -197,7 +201,7 @@ const aliasFlags = (cfg) => [
   `--alias:next/navigation=${join(cfg.shimsDir, "next-navigation.js")}`,
 ];
 
-async function build(cfg, comps) {
+async function build(cfg, comps, flags = {}) {
   head("build", `${comps.length} selected`);
   mkdirSync(cfg.outDir, { recursive: true });
   const tmp = tmpDir(cfg);
@@ -237,6 +241,14 @@ async function build(cfg, comps) {
 
   // 2. build; on failure, evict the offending component(s) and retry
   const t0 = Date.now();
+  // Build into the temp dir, then publish _ds_bundle.js (always) and
+  // _ds_bundle.css (unless --js-only) to outDir. --js-only preserves a committed
+  // _ds_bundle.css when sources carry no styles (e.g. self-contained .jsx whose
+  // scoped classes live in a separately-compiled stylesheet).
+  const outJs = join(cfg.outDir, "_ds_bundle.js");
+  const outCss = join(cfg.outDir, "_ds_bundle.css");
+  const tmpJs = join(tmp, "_ds_bundle.js");
+  const tmpCss = join(tmp, "_ds_bundle.css");
   const sp = spinner(`bundling ${pending.length} component${pending.length === 1 ? "" : "s"}…`);
   while (pending.length) {
     writeEntry(pending);
@@ -244,9 +256,13 @@ async function build(cfg, comps) {
       entry, "--bundle", "--format=iife", "--jsx=automatic",
       `--tsconfig=${tsconfig}`, ...aliasFlags(cfg),
       `--banner:js=${bundleHeader(cfg, pending)}`,
-      `--outfile=${join(cfg.outDir, "_ds_bundle.js")}`,
+      `--outfile=${tmpJs}`,
     ]);
-    if (r.ok) break;
+    if (r.ok) {
+      if (!flags["css-only"]) copyFileSync(tmpJs, outJs);
+      if (!flags["js-only"] && existsSync(tmpCss)) copyFileSync(tmpCss, outCss);
+      break;
+    }
     const culprits = pending.filter((c) => r.stderr.includes(basename(c.path)) || r.stderr.includes(c.name));
     if (!culprits.length) { sp.stop(); cleanup(); die(`esbuild error not attributable to a component:\n${dim(r.stderr.trim())}`); }
     for (const c of culprits) failed.push({ name: c.name, reason: errorFor(c, r.stderr) });
@@ -284,6 +300,58 @@ function toAlias(cfg, p) {
     if (p.startsWith(prefix)) return k.replace(/\*$/, "") + p.slice(prefix.length);
   }
   return resolve(cfg.repoRoot, p);
+}
+
+// ---------- generate ---------------------------------------------------------
+// Deterministically produce each self-contained component .jsx FROM the real app
+// source (comp.appPath, else comp.path) — inlining @/lib helpers, shimming next/*,
+// turning the CSS-module import into a scoped class map, keeping npm deps as bare
+// (runtime-provided) imports. The .jsx becomes a build artifact, not a hand fork,
+// so it can't drift: re-run generate after the app changes.
+async function generate(cfg, comps) {
+  head("generate", `${comps.length} selected`);
+  mkdirSync(cfg.outDir, { recursive: true });
+  const tmp = tmpDir(cfg);
+  const tsconfig = writeTsconfig(cfg, tmp);
+  const cleanup = () => existsSync(tmp) && rmSync(tmp, { recursive: true, force: true });
+  const t0 = Date.now();
+  const done = [], failed = [];
+
+  const sp = spinner(`generating ${comps.length} component${comps.length === 1 ? "" : "s"} from source…`);
+  for (const c of comps) {
+    const appSrc = c.appPath || c.path;
+    const abs = resolve(cfg.repoRoot, appSrc);
+    if (!existsSync(abs)) { failed.push({ name: c.name, reason: `source not found: ${appSrc}` }); continue; }
+    const tmpOut = join(tmp, `${c.name}.js`);
+    const r = await runEsbuild(cfg, [
+      abs, "--bundle", "--format=esm", "--jsx=automatic", "--packages=external",
+      `--tsconfig=${tsconfig}`, ...aliasFlags(cfg), `--outfile=${tmpOut}`,
+    ]);
+    if (!r.ok) { failed.push({ name: c.name, reason: errorFor({ ...c, path: appSrc }, r.stderr) }); continue; }
+    const dir = join(cfg.outDir, "components", c.group, c.name);
+    mkdirSync(dir, { recursive: true });
+    const banner = `// GENERATED by ds-component-kit from ${appSrc} — do not edit; re-run \`generate\`.\n`;
+    writeFileSync(join(dir, `${c.name}.jsx`), banner + readFileSync(tmpOut, "utf8"));
+    done.push(c);
+  }
+  sp.stop();
+  cleanup();
+
+  if (done.length) {
+    console.log(`  ${G.ok} ${bold("generated")}${sep}${done.length} component${done.length === 1 ? "" : "s"}${sep}${fmtMs(Date.now() - t0)}`);
+    const byGroup = {};
+    for (const c of done) (byGroup[c.group] ||= []).push(c.name);
+    for (const [g, ns] of Object.entries(byGroup)) console.log(`    ${dim(pad(g, 10))} ${dim(ns.join(", "))}`);
+  } else {
+    console.log(`  ${G.err} ${bold("nothing generated.")}`);
+  }
+  if (failed.length) {
+    console.log(`\n  ${yellow(`${failed.length} skipped`)} ${dim("(coupled to app-only code — keep hand-authored or refactor)")}`);
+    const w = Math.max(...failed.map((f) => f.name.length));
+    for (const f of failed) console.log(`    ${G.warn} ${pad(f.name, w)}  ${dim(f.reason)}`);
+  }
+  console.log(dim(`\n  next: ${cyan("build --js-only")} ${dim("→")} ${cyan("verify")} to confirm parity\n`));
+  if (!done.length) process.exit(1);
 }
 
 // ---------- scaffold ---------------------------------------------------------
@@ -537,6 +605,7 @@ function help() {
   ${bold("Usage")}  ${dim("ds-component-kit <command> [flags]")}
 
 ${cmd("init", "write a config template")}
+${cmd("generate [--only A,B]", "regenerate component .jsx from real app source (no fork)")}
 ${cmd("build [--only A,B]", "bundle components → _ds_bundle.js + .css")}
 ${cmd("scaffold [--only A,B]", "scaffold components/<Group>/<Name>/ artifacts")}
 ${cmd("verify [--only A,B]", "headless-render each component + fixture (ok/blank/error)")}
@@ -546,6 +615,8 @@ ${cmd("serve [--port 8770]", "static-serve the output dir for a render check")}
     ${cyan("--config")} ${dim("<path>")}   ${dim("config file (default: ./ds-component-kit.config.json)")}
     ${cyan("--only")} ${dim("<A,B>")}      ${dim("limit to named components")}
     ${cyan("--name")} ${dim("<N>")} ${cyan("--group")} ${dim("<G>")}  ${dim("ad-hoc, no config (with a path arg)")}
+    ${cyan("--js-only")}         ${dim("build: write _ds_bundle.js only (preserve a committed .css)")}
+    ${cyan("--css-only")}        ${dim("build: write _ds_bundle.css only (regen from app CSS modules)")}
     ${cyan("--chrome")} ${dim("<path>")}   ${dim("verify: Chrome binary (or set CHROME=)")}
     ${cyan("--keep")}            ${dim("verify: keep temp render files")}
     ${dim("NO_COLOR=1")}        ${dim("disable colored output")}
@@ -569,7 +640,8 @@ async function main() {
   };
   switch (cmd) {
     case "init": init(flags); break;
-    case "build": { const cfg = loadConfig(flags); await build(cfg, select(cfg)); break; }
+    case "build": { const cfg = loadConfig(flags); await build(cfg, select(cfg), flags); break; }
+    case "generate": { const cfg = loadConfig(flags); await generate(cfg, select(cfg)); break; }
     case "scaffold": {
       const cfg = loadConfig(flags); const sel = select(cfg);
       head("scaffold", `${sel.length} selected`);
