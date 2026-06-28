@@ -20,7 +20,7 @@
 
 import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync, statSync } from "node:fs";
 import { dirname, resolve, join, basename, relative } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 
@@ -157,16 +157,20 @@ function errorFor(comp, stderr) {
 }
 
 // A temp tsconfig so esbuild resolves the repo's path aliases (e.g. @/*).
-function writeTsconfig(cfg) {
+function writeTsconfig(cfg, dir) {
   const paths = {};
   for (const [k, v] of Object.entries(cfg.srcAlias || { "@/*": "src/*" })) paths[k] = [v];
-  const tsconfig = join(cfg.outDir, ".dck-tsconfig.json");
+  const tsconfig = join(dir, ".dck-tsconfig.json");
   writeFileSync(
     tsconfig,
     JSON.stringify({ compilerOptions: { baseUrl: cfg.repoRoot, paths, jsx: "react-jsx" } }, null, 2),
   );
   return tsconfig;
 }
+
+// Transient build scratch under repoRoot, so esbuild resolves bare imports
+// (react, react-dom) from repoRoot/node_modules regardless of where outDir is.
+const tmpDir = (cfg) => { const d = join(cfg.repoRoot, ".dck-tmp"); mkdirSync(d, { recursive: true }); return d; };
 
 function bundleHeader(cfg, comps) {
   return (
@@ -196,9 +200,10 @@ const aliasFlags = (cfg) => [
 async function build(cfg, comps) {
   head("build", `${comps.length} selected`);
   mkdirSync(cfg.outDir, { recursive: true });
-  const tsconfig = writeTsconfig(cfg);
-  const entry = join(cfg.outDir, ".dck-entry.jsx");
-  const cleanup = () => [entry, tsconfig].forEach((f) => existsSync(f) && rmSync(f));
+  const tmp = tmpDir(cfg);
+  const tsconfig = writeTsconfig(cfg, tmp);
+  const entry = join(tmp, ".dck-entry.jsx");
+  const cleanup = () => existsSync(tmp) && rmSync(tmp, { recursive: true, force: true });
   const failed = [];
 
   // 1. resolve each component's export symbol up front; unresolvable → skipped
@@ -428,12 +433,13 @@ async function verify(cfg, comps, flags) {
   const chrome = findChrome(flags);
   if (!chrome) die(`no Chrome/Chromium found. Set ${cyan("CHROME=<path>")} or pass ${cyan("--chrome <path>")}.`);
   mkdirSync(cfg.outDir, { recursive: true });
-  const tsconfig = writeTsconfig(cfg);
-  const entry = join(cfg.outDir, ".dck-verify.jsx");
-  const html = join(cfg.outDir, ".dck-verify.html");
+  const tmp = tmpDir(cfg);
+  const tsconfig = writeTsconfig(cfg, tmp);
+  const entry = join(tmp, ".dck-verify.jsx");      // under repoRoot → react resolves
+  const html = join(cfg.outDir, ".dck-verify.html"); // next to styles.css for the render
   const js = join(cfg.outDir, ".dck-verify.js");
   const keep = !!flags.keep;
-  const cleanup = () => { if (!keep) [entry, tsconfig, html, js, js.replace(/\.js$/, ".css")].forEach((f) => existsSync(f) && rmSync(f)); };
+  const cleanup = () => { if (!keep) { existsSync(tmp) && rmSync(tmp, { recursive: true, force: true }); [html, js, js.replace(/\.js$/, ".css")].forEach((f) => existsSync(f) && rmSync(f)); } };
 
   const runnable = [], skipped = [];
   for (const c of comps) {
@@ -551,7 +557,10 @@ ${cmd("serve [--port 8770]", "static-serve the output dir for a render check")}
 }
 
 // ---------- main -------------------------------------------------------------
-(async () => {
+// Exported for tests; main() only runs when invoked directly as a CLI.
+export { parseArgs, exportSymbol, listExports, toAlias, bundleHeader, cssClassMap, fmtBytes, fmtMs };
+
+async function main() {
   const { cmd, pos, flags } = parseArgs(process.argv.slice(2));
   const select = (cfg) => {
     const sel = pickComponents(cfg, flags, pos);
@@ -574,4 +583,6 @@ ${cmd("serve [--port 8770]", "static-serve the output dir for a render check")}
     case "help": case "--help": case "-h": case undefined: help(); break;
     default: die(`unknown command ${cyan(cmd)}. Run ${cyan("ds-component-kit help")}.`);
   }
-})();
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main();
