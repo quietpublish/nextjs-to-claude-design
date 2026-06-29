@@ -52,7 +52,18 @@ test("bundleHeader: valid @ds-bundle JSON listing components + sourcePaths", () 
   assert.deepEqual(json.components, [
     { name: "Card", group: "Cards", sourcePath: "components/Cards/Card/Card.jsx" },
   ]);
-  assert.ok(json.inlinedExternals.includes("react"));
+  assert.deepEqual(json.inlinedExternals, []); // react is runtime-provided, not inlined
+  assert.equal(json.runtimeGlobals.react, "React");
+  assert.deepEqual(json.unexposedExports, []); // no exports info → nothing extra
+});
+
+test("bundleHeader: compound parts (PascalCase non-root exports) land in unexposedExports", () => {
+  const h = bundleHeader(cfg, [
+    { name: "Card", group: "Cards", exports: ["Card", "CardHeader", "CardTitle", "default", "cardClass"] },
+  ]);
+  const json = JSON.parse(h.replace(/^\/\* @ds-bundle: /, "").replace(/ \*\/$/, ""));
+  // registered root (Card), `default`, and camelCase helper (cardClass) excluded; parts sorted.
+  assert.deepEqual(json.unexposedExports, ["CardHeader", "CardTitle"]);
 });
 
 test("fmtBytes: B / KB / MB thresholds", () => {

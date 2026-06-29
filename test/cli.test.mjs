@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import vm from "node:vm";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = join(HERE, "..");
@@ -107,4 +108,79 @@ test("verify: renders a component with its fixture (ok)", { skip: !hasChrome() &
   assert.match(r.stdout, /StatCard/);
   assert.match(r.stdout, /\bok\b/);
   assert.match(r.stdout, /1 ok/);
+});
+
+test("build: a compound component exposes its parts on the namespace (not just the root)", () => {
+  const cp = join(out, "compound.config.json");
+  writeFileSync(cp, JSON.stringify({
+    repoRoot: REPO, srcAlias: { "@/*": "src/*" }, namespace: "DS_compound",
+    outDir: join(out, "compound"), shimsDir: SHIMS,
+    components: [{ path: "test/fixtures/Panel.tsx", name: "Panel", group: "Layout" }],
+  }));
+  const r = run(["build", "--config", cp, "--js-only"]);
+  assert.equal(r.status, 0, r.stderr);
+
+  const code = readFileSync(join(out, "compound", "_ds_bundle.js"), "utf8");
+  // header: only Panel is a registered card; the parts are recorded as exposed-but-not-carded
+  const json = JSON.parse(code.split("\n")[0].replace(/^\/\* @ds-bundle: /, "").replace(/ \*\/$/, ""));
+  assert.deepEqual(json.components.map((c) => c.name), ["Panel"]);
+  assert.deepEqual(json.unexposedExports, ["PanelBody", "PanelHeader"]); // camelCase panelClass excluded
+
+  // runtime: evaluating the IIFE attaches the root AND its parts to window.<ns>.
+  // The bundle resolves React from window.React (runtime-provided) — model that
+  // with a permissive stub so the shim's eager reads succeed.
+  const React = new Proxy({}, { get: () => () => null });
+  const sandbox = { window: { React, ReactDOM: React }, console };
+  vm.runInNewContext(code, sandbox);
+  const ns = sandbox.window.DS_compound;
+  assert.equal(typeof ns.Panel, "function", "root attached");
+  assert.equal(typeof ns.PanelHeader, "function", "compound part attached");
+  assert.equal(typeof ns.PanelBody, "function", "compound part attached");
+  assert.equal(ns.panelClass, undefined, "camelCase helper is not exposed as a component");
+});
+
+test("build: React is resolved from the runtime global, not inlined", () => {
+  const cp = join(out, "react-ext.config.json");
+  writeFileSync(cp, JSON.stringify({
+    repoRoot: REPO, srcAlias: { "@/*": "src/*" }, namespace: "DS_reactext",
+    outDir: join(out, "react-ext"), shimsDir: SHIMS,
+    components: [{ path: "test/fixtures/Panel.tsx", name: "Panel", group: "Layout" }],
+  }));
+  const r = run(["build", "--config", cp, "--js-only"]);
+  assert.equal(r.status, 0, r.stderr);
+
+  const code = readFileSync(join(out, "react-ext", "_ds_bundle.js"), "utf8");
+  const json = JSON.parse(code.split("\n")[0].replace(/^\/\* @ds-bundle: /, "").replace(/ \*\/$/, ""));
+  assert.deepEqual(json.inlinedExternals, [], "header declares nothing inlined");
+  assert.equal(json.runtimeGlobals.react, "React");
+  // the bundle reads React from the global rather than carrying its own copy
+  assert.match(code, /window\.React/);
+  // a second React would drag in its internals dispatcher; externalized, it won't
+  assert.doesNotMatch(code, /ReactCurrentDispatcher/);
+});
+
+test("verify: isolates a component that fails to compile (others still verify)", { skip: !hasChrome() && "no Chrome available" }, () => {
+  const vp = join(out, "verify-iso.config.json");
+  const vout = join(out, "verify-iso");
+  writeFileSync(vp, JSON.stringify({
+    repoRoot: REPO, srcAlias: { "@/*": "src/*" }, namespace: "DS_iso",
+    outDir: vout, shimsDir: SHIMS,
+    components: [
+      { path: "test/fixtures/StatCard.tsx", name: "StatCard", group: "Cards" },
+      { path: "test/fixtures/Broken.tsx", name: "Broken", group: "Misc" }, // imports a missing module
+    ],
+  }));
+  for (const [g, n] of [["Cards", "StatCard"], ["Misc", "Broken"]]) {
+    const d = join(vout, "components", g, n);
+    mkdirSync(d, { recursive: true });
+    writeFileSync(join(d, "fixture.mjs"), `export const props = { label: "Revenue", value: "$9,000" };\n`);
+  }
+
+  const r = run(["verify", "--config", vp]);
+  // Broken won't bundle → evicted + reported error → exit 1; StatCard still renders ok.
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.match(r.stdout, /StatCard/);
+  assert.match(r.stdout, /1 ok/);
+  assert.match(r.stdout, /Broken/);
+  assert.match(r.stdout, /\berror\b/);
 });

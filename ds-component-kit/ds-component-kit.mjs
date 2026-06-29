@@ -178,6 +178,13 @@ function writeTsconfig(cfg, dir) {
 const tmpDir = (cfg) => { const d = join(cfg.repoRoot, `.dck-tmp-${process.pid}`); mkdirSync(d, { recursive: true }); return d; };
 
 function bundleHeader(cfg, comps) {
+  // Compound parts (CardHeader, CardTitle, …) ride along on the namespace so a
+  // design that composes them resolves, but they aren't registered as their own
+  // cards. Record the PascalCase exports we attach beyond the registered roots.
+  const registered = new Set(comps.map((c) => c.name));
+  const unexposedExports = [...new Set(
+    comps.flatMap((c) => (c.exports || []).filter((e) => e !== "default" && /^[A-Z]/.test(e) && !registered.has(e))),
+  )].sort();
   return (
     `/* @ds-bundle: ` +
     JSON.stringify({
@@ -189,8 +196,12 @@ function bundleHeader(cfg, comps) {
         sourcePath: `components/${c.group}/${c.name}/${c.name}.jsx`,
       })),
       sourceHashes: {},
-      inlinedExternals: ["react", "react/jsx-runtime"],
-      unexposedExports: [],
+      // React/ReactDOM are resolved from the runtime globals (window.React /
+      // window.ReactDOM), never inlined — so the bundle shares the runtime's one
+      // React instance. The in-browser bundler can reproduce this.
+      inlinedExternals: [],
+      runtimeGlobals: { react: "React", "react-dom": "ReactDOM" },
+      unexposedExports,
     }) +
     ` */`
   );
@@ -201,6 +212,17 @@ const aliasFlags = (cfg) => [
   `--alias:next/image=${join(cfg.shimsDir, "next-image.jsx")}`,
   `--alias:next/navigation=${join(cfg.shimsDir, "next-navigation.js")}`,
   `--alias:next/dynamic=${join(cfg.shimsDir, "next-dynamic.js")}`,
+];
+
+// The uploaded bundle must use the design runtime's own React (window.React /
+// window.ReactDOM), not a second inlined copy — two Reacts break hooks/context.
+// Aliasing the `react` / `react-dom` directories also remaps their subpaths
+// (react/jsx-runtime, react-dom/client). Applied to `build` ONLY: `generate`
+// keeps react bare and `verify` renders with a real inlined React in headless
+// Chrome (no window.React there).
+const reactGlobalFlags = (cfg) => [
+  `--alias:react=${join(cfg.shimsDir, "react")}`,
+  `--alias:react-dom=${join(cfg.shimsDir, "react-dom")}`,
 ];
 
 // Tailwind apps (shadcn/ui etc.) style via utilities, not CSS Modules — esbuild
@@ -256,21 +278,25 @@ async function build(cfg, comps, flags = {}) {
       failed.push({ name: c.name, reason: `no usable export (found: ${listExports(src).join(", ") || "none"}); set "export", or it isn't a component.` });
       continue;
     }
-    pending.push({ ...c, sym });
+    pending.push({ ...c, sym, exports: listExports(src) });
   }
 
   const writeEntry = (list) => {
-    const imports = list
-      .map((c, i) => c.sym === "default"
-        ? `import C${i} from ${JSON.stringify(toAlias(cfg, c.path))};`
-        : `import { ${c.sym} as C${i} } from ${JSON.stringify(toAlias(cfg, c.path))};`)
-      .join("\n");
-    const attach = list.map((c, i) => `__ds_ns[${JSON.stringify(c.name)}] = C${i};`).join("\n");
+    // Namespace import so we can attach a compound component's parts too, not
+    // just its root: <Card> needs CardHeader/CardTitle/… on the namespace to compose.
+    const imports = list.map((c, i) => `import * as NS${i} from ${JSON.stringify(toAlias(cfg, c.path))};`).join("\n");
+    // Registered roots own their name (resolve the chosen export, else default)…
+    const roots = list.map((c, i) =>
+      `__ds_ns[${JSON.stringify(c.name)}] = (NS${i}[${JSON.stringify(c.sym)}] !== undefined ? NS${i}[${JSON.stringify(c.sym)}] : NS${i}.default);`).join("\n");
+    // …then ride every other PascalCase export (compound parts) along without
+    // clobbering a registered component that happens to share a name.
+    const parts = list.map((c, i) =>
+      `for (const k in NS${i}) { if (k !== "default" && /^[A-Z]/.test(k) && __ds_ns[k] === undefined) __ds_ns[k] = NS${i}[k]; }`).join("\n");
     writeFileSync(
       entry,
       `import React from "react";\n${imports}\n` +
         `const __ds_ns = (window.${cfg.namespace} = window.${cfg.namespace} || {});\n` +
-        `(__ds_ns.__errors = __ds_ns.__errors || []);\n__ds_ns.React = React;\n${attach}\n`,
+        `(__ds_ns.__errors = __ds_ns.__errors || []);\n__ds_ns.React = React;\n${roots}\n${parts}\n`,
     );
   };
 
@@ -289,7 +315,7 @@ async function build(cfg, comps, flags = {}) {
     writeEntry(pending);
     const r = await runEsbuild(cfg, [
       entry, "--bundle", "--format=iife", "--jsx=automatic",
-      `--tsconfig=${tsconfig}`, ...aliasFlags(cfg),
+      `--tsconfig=${tsconfig}`, ...aliasFlags(cfg), ...reactGlobalFlags(cfg),
       `--banner:js=${bundleHeader(cfg, pending)}`,
       `--outfile=${tmpJs}`,
     ]);
@@ -597,7 +623,7 @@ async function verify(cfg, comps, flags) {
   const keep = !!flags.keep;
   const cleanup = () => { if (!keep) { existsSync(tmp) && rmSync(tmp, { recursive: true, force: true }); [html, js, js.replace(/\.js$/, ".css")].forEach((f) => existsSync(f) && rmSync(f)); } };
 
-  const runnable = [], skipped = [];
+  let runnable = []; const skipped = [];
   for (const c of comps) {
     const abs = resolve(cfg.repoRoot, c.path);
     const fix = join(cfg.outDir, "components", c.group, c.name, "fixture.mjs");
@@ -615,46 +641,67 @@ async function verify(cfg, comps, flags) {
     process.exit(1);
   }
 
-  const imp = runnable.map((c, i) =>
-    (c.sym === "default" ? `import C${i} from ${JSON.stringify(toAlias(cfg, c.path))};`
-      : `import { ${c.sym} as C${i} } from ${JSON.stringify(toAlias(cfg, c.path))};`) +
-    `\nimport { props as P${i} } from ${JSON.stringify(c.fix)};`).join("\n");
-  const items = runnable.map((c, i) => `{ name: ${JSON.stringify(c.name)}, C: C${i}, props: P${i} }`).join(", ");
-  writeFileSync(entry,
-    `import React from "react";\nimport { createRoot } from "react-dom/client";\nimport { flushSync } from "react-dom";\n${imp}\n` +
-    `const items = [${items}];\nconst results = [];\n` +
-    `for (const it of items) {\n` +
-    `  const before = document.body.childElementCount;\n` +
-    `  const el = document.createElement("div"); document.body.appendChild(el);\n` +
-    `  let error = null;\n` +
-    `  const root = createRoot(el, { onUncaughtError: (e) => { error = String((e && e.message) || e); }, onCaughtError: (e) => { error = String((e && e.message) || e); } });\n` +
-    `  try { flushSync(() => root.render(React.createElement(it.C, it.props))); }\n` +
-    `  catch (e) { error = error || String((e && e.message) || e); }\n` +
-    `  const text = (el.textContent || "").trim();\n` +
-    `  const markup = (el.innerHTML || "").trim();\n` +
-    // overlays portal to <body>: detect per-component (body grew beyond our own el), no cross-contamination
-    `  const portal = document.body.childElementCount > before + 1;\n` +
-    `  const ok = !error && (text.length > 0 || markup.length > 0 || portal);\n` +
-    `  results.push({ name: it.name, ok, len: text.length || markup.length, portal, error });\n` +
-    `  try { root.unmount(); } catch (e) {}\n` +
-    `  while (document.body.childElementCount > before) document.body.removeChild(document.body.lastElementChild);\n` +
-    `}\n` +
-    `const pre = document.createElement("pre"); pre.id = "__results"; pre.textContent = btoa(unescape(encodeURIComponent(JSON.stringify(results)))); document.body.appendChild(pre);\n`);
+  // Fixtures import as a namespace so `children` is optional (compound fixtures
+  // export it; simple ones only export `props`). Component imports as a namespace
+  // too, to resolve the chosen export or default uniformly.
+  const writeVerifyEntry = (list) => {
+    const imp = list.map((c, i) =>
+      `import * as NS${i} from ${JSON.stringify(toAlias(cfg, c.path))};\n` +
+      `import * as F${i} from ${JSON.stringify(c.fix)};`).join("\n");
+    const items = list.map((c, i) =>
+      `{ name: ${JSON.stringify(c.name)}, C: (NS${i}[${JSON.stringify(c.sym)}] !== undefined ? NS${i}[${JSON.stringify(c.sym)}] : NS${i}.default), props: (F${i}.props || {}), children: F${i}.children }`).join(", ");
+    writeFileSync(entry,
+      `import React from "react";\nimport { createRoot } from "react-dom/client";\nimport { flushSync } from "react-dom";\n${imp}\n` +
+      `const items = [${items}];\nconst results = [];\n` +
+      `for (const it of items) {\n` +
+      `  const before = document.body.childElementCount;\n` +
+      `  const el = document.createElement("div"); document.body.appendChild(el);\n` +
+      `  let error = null;\n` +
+      `  const root = createRoot(el, { onUncaughtError: (e) => { error = String((e && e.message) || e); }, onCaughtError: (e) => { error = String((e && e.message) || e); } });\n` +
+      `  const kids = Array.isArray(it.children) ? it.children : (it.children != null ? [it.children] : []);\n` +
+      `  try { flushSync(() => root.render(React.createElement(it.C, it.props, ...kids))); }\n` +
+      `  catch (e) { error = error || String((e && e.message) || e); }\n` +
+      `  const text = (el.textContent || "").trim();\n` +
+      `  const markup = (el.innerHTML || "").trim();\n` +
+      // overlays portal to <body>: detect per-component (body grew beyond our own el), no cross-contamination
+      `  const portal = document.body.childElementCount > before + 1;\n` +
+      `  const ok = !error && (text.length > 0 || markup.length > 0 || portal);\n` +
+      `  results.push({ name: it.name, ok, len: text.length || markup.length, portal, error });\n` +
+      `  try { root.unmount(); } catch (e) {}\n` +
+      `  while (document.body.childElementCount > before) document.body.removeChild(document.body.lastElementChild);\n` +
+      `}\n` +
+      `const pre = document.createElement("pre"); pre.id = "__results"; pre.textContent = btoa(unescape(encodeURIComponent(JSON.stringify(results)))); document.body.appendChild(pre);\n`);
+  };
   writeFileSync(html, `<!DOCTYPE html><html><head><meta charset="utf-8"><link rel="stylesheet" href="./styles.css"><link rel="stylesheet" href="./.dck-verify.css"></head><body><script src="./.dck-verify.js"></script></body></html>`);
 
   const sp = spinner(`rendering ${runnable.length} component${runnable.length === 1 ? "" : "s"} in headless Chrome…`);
   const t0 = Date.now();
-  const b = await runEsbuild(cfg, [entry, "--bundle", "--format=iife", "--jsx=automatic", `--tsconfig=${tsconfig}`, ...aliasFlags(cfg), `--outfile=${js}`]);
-  if (!b.ok) { sp.stop(); cleanup(); die(`verify bundle failed:\n${dim(b.stderr.trim())}`); }
-  const r = await sh(chrome, ["--headless=new", "--disable-gpu", "--no-sandbox", "--hide-scrollbars", "--virtual-time-budget=6000", "--dump-dom", `file://${html}`]);
+  // Bundle; if a component (or its fixture) won't compile, evict it and retry the
+  // rest — one bad component no longer fails the whole verify pass.
+  const bundleFailed = [];
+  let r = null;
+  while (runnable.length) {
+    writeVerifyEntry(runnable);
+    const b = await runEsbuild(cfg, [entry, "--bundle", "--format=iife", "--jsx=automatic", `--tsconfig=${tsconfig}`, ...aliasFlags(cfg), `--outfile=${js}`]);
+    if (b.ok) { r = await sh(chrome, ["--headless=new", "--disable-gpu", "--no-sandbox", "--hide-scrollbars", "--virtual-time-budget=6000", "--dump-dom", `file://${html}`]); break; }
+    const culprits = runnable.filter((c) => b.stderr.includes(basename(c.path)) || b.stderr.includes(c.name) || b.stderr.includes(basename(c.fix)));
+    if (!culprits.length) { sp.stop(); cleanup(); die(`verify bundle failed:\n${dim(b.stderr.trim())}`); }
+    for (const c of culprits) bundleFailed.push({ name: c.name, error: errorFor(c, b.stderr) });
+    runnable = runnable.filter((c) => !culprits.includes(c));
+    sp.set(`rendering ${runnable.length} component${runnable.length === 1 ? "" : "s"}… ${dim(`(evicted ${culprits.map((c) => c.name).join(", ")})`)}`);
+  }
   sp.stop();
   cleanup();
 
-  const m = (r.stdout || "").match(/<pre id="__results">([^<]*)<\/pre>/);
-  if (!m) die(`could not read render results from headless Chrome.\n${dim((r.stderr || "").split("\n").slice(0, 5).join("\n"))}`);
-  let results;
-  try { results = JSON.parse(Buffer.from(m[1], "base64").toString("utf8")); }
-  catch { die(`could not parse render results.`); }
+  let results = [];
+  if (r) {
+    const m = (r.stdout || "").match(/<pre id="__results">([^<]*)<\/pre>/);
+    if (!m) die(`could not read render results from headless Chrome.\n${dim((r.stderr || "").split("\n").slice(0, 5).join("\n"))}`);
+    try { results = JSON.parse(Buffer.from(m[1], "base64").toString("utf8")); }
+    catch { die(`could not parse render results.`); }
+  }
+  // components that failed to compile surface as errors alongside the rendered ones
+  for (const f of bundleFailed) results.push({ name: f.name, ok: false, len: 0, portal: false, error: f.error });
 
   const w = Math.max(...results.map((x) => x.name.length), ...skipped.map((x) => x.name.length), 0);
   let okN = 0, blankN = 0, errN = 0;
