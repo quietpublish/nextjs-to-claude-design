@@ -203,7 +203,40 @@ const aliasFlags = (cfg) => [
   `--alias:next/dynamic=${join(cfg.shimsDir, "next-dynamic.js")}`,
 ];
 
+// Tailwind apps (shadcn/ui etc.) style via utilities, not CSS Modules — esbuild
+// can't produce that CSS. Compile it with the Tailwind CLI: the app's globals.css
+// (its @tailwind directives + :root/.dark vars) as input, the app's config for the
+// theme, and the GENERATED component .jsx as the content set so only the utilities
+// those components use are emitted. Needs config: "tailwind": { input, config }.
+function tailwindCss(cfg) {
+  const tw = cfg.tailwind || {};
+  if (!tw.input) die(`--tailwind needs a "tailwind": { "input": "<globals.css>", "config": "<tailwind.config>" } block in the config.`);
+  const input = resolve(cfg.repoRoot, tw.input);
+  if (!existsSync(input)) die(`tailwind input not found: ${tw.input}`);
+  const outCss = join(cfg.outDir, "_ds_bundle.css");
+  // scan both the generated components AND the @dsCard preview HTML (cards use
+  // utility classes too — otherwise their utilities get tree-shaken away).
+  const content = join(cfg.outDir, "components", "**", "*.{jsx,html}");
+  const local = join(cfg.repoRoot, "node_modules", ".bin", "tailwindcss");
+  const useLocal = existsSync(local);
+  const args = ["-i", input, "-o", outCss, "--content", content, "--minify"];
+  if (tw.config) args.push("-c", resolve(cfg.repoRoot, tw.config));
+  return sh(useLocal ? local : "npx", useLocal ? args : ["--yes", "tailwindcss@3", ...args]);
+}
+
 async function build(cfg, comps, flags = {}) {
+  // Tailwind CSS regen only (no JS) — `build --tailwind --css-only`.
+  if (flags.tailwind && flags["css-only"]) {
+    head("build", "tailwind css");
+    mkdirSync(cfg.outDir, { recursive: true });
+    const sp = spinner("compiling Tailwind CSS…");
+    const r = await tailwindCss(cfg);
+    sp.stop();
+    if (!r.ok) die(`tailwind failed:\n${dim(r.stderr.trim())}`);
+    const css = join(cfg.outDir, "_ds_bundle.css");
+    console.log(`  ${G.ok} ${bold("tailwind css")}${sep}${fmtBytes(statSync(css).size)}  ${G.arrow} ${cyan(rel(css))}\n`);
+    return;
+  }
   head("build", `${comps.length} selected`);
   mkdirSync(cfg.outDir, { recursive: true });
   const tmp = tmpDir(cfg);
@@ -273,6 +306,14 @@ async function build(cfg, comps, flags = {}) {
   }
   sp.stop();
   cleanup();
+
+  // 2b. Tailwind apps: compile the component CSS from utilities (esbuild can't).
+  if (flags.tailwind && pending.length) {
+    const sp2 = spinner("compiling Tailwind CSS…");
+    const r = await tailwindCss(cfg);
+    sp2.stop();
+    if (!r.ok) die(`tailwind failed:\n${dim(r.stderr.trim())}`);
+  }
 
   // 3. report
   if (pending.length) {
@@ -583,13 +624,20 @@ async function verify(cfg, comps, flags) {
     `import React from "react";\nimport { createRoot } from "react-dom/client";\nimport { flushSync } from "react-dom";\n${imp}\n` +
     `const items = [${items}];\nconst results = [];\n` +
     `for (const it of items) {\n` +
+    `  const before = document.body.childElementCount;\n` +
     `  const el = document.createElement("div"); document.body.appendChild(el);\n` +
     `  let error = null;\n` +
     `  const root = createRoot(el, { onUncaughtError: (e) => { error = String((e && e.message) || e); }, onCaughtError: (e) => { error = String((e && e.message) || e); } });\n` +
     `  try { flushSync(() => root.render(React.createElement(it.C, it.props))); }\n` +
     `  catch (e) { error = error || String((e && e.message) || e); }\n` +
     `  const text = (el.textContent || "").trim();\n` +
-    `  results.push({ name: it.name, ok: !error && text.length > 0, len: text.length, error });\n` +
+    `  const markup = (el.innerHTML || "").trim();\n` +
+    // overlays portal to <body>: detect per-component (body grew beyond our own el), no cross-contamination
+    `  const portal = document.body.childElementCount > before + 1;\n` +
+    `  const ok = !error && (text.length > 0 || markup.length > 0 || portal);\n` +
+    `  results.push({ name: it.name, ok, len: text.length || markup.length, portal, error });\n` +
+    `  try { root.unmount(); } catch (e) {}\n` +
+    `  while (document.body.childElementCount > before) document.body.removeChild(document.body.lastElementChild);\n` +
     `}\n` +
     `const pre = document.createElement("pre"); pre.id = "__results"; pre.textContent = btoa(unescape(encodeURIComponent(JSON.stringify(results)))); document.body.appendChild(pre);\n`);
   writeFileSync(html, `<!DOCTYPE html><html><head><meta charset="utf-8"><link rel="stylesheet" href="./styles.css"><link rel="stylesheet" href="./.dck-verify.css"></head><body><script src="./.dck-verify.js"></script></body></html>`);
@@ -613,7 +661,7 @@ async function verify(cfg, comps, flags) {
   for (const res of results) {
     if (res.error) { errN++; console.log(`    ${G.err} ${pad(res.name, w)}  ${red("error")}  ${dim(res.error)}`); }
     else if (!res.ok) { blankN++; console.log(`    ${G.warn} ${pad(res.name, w)}  ${yellow("blank")}  ${dim("rendered no text — check the fixture")}`); }
-    else { okN++; console.log(`    ${G.ok} ${pad(res.name, w)}  ${green("ok")}     ${dim(res.len + " chars")}`); }
+    else { okN++; console.log(`    ${G.ok} ${pad(res.name, w)}  ${green("ok")}     ${dim(res.portal ? "rendered (portal/overlay)" : res.len + " chars")}`); }
   }
   for (const s of skipped) console.log(`    ${G.dot} ${pad(s.name, w)}  ${gray("skip")}   ${dim(s.reason)}`);
 
@@ -667,6 +715,7 @@ ${cmd("serve [--port 8770]", "static-serve the output dir for a render check")}
     ${cyan("--name")} ${dim("<N>")} ${cyan("--group")} ${dim("<G>")}  ${dim("ad-hoc, no config (with a path arg)")}
     ${cyan("--js-only")}         ${dim("build: write _ds_bundle.js only (preserve a committed .css)")}
     ${cyan("--css-only")}        ${dim("build: write _ds_bundle.css only (regen from app CSS modules)")}
+    ${cyan("--tailwind")}        ${dim("build: compile _ds_bundle.css with Tailwind (needs config.tailwind)")}
     ${cyan("--chrome")} ${dim("<path>")}   ${dim("verify: Chrome binary (or set CHROME=)")}
     ${cyan("--keep")}            ${dim("verify: keep temp render files")}
     ${dim("NO_COLOR=1")}        ${dim("disable colored output")}

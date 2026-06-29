@@ -6,7 +6,8 @@ consumes — so the design agent builds new screens out of your *real* component
 
 This exists because `/design-sync`'s converter targets a **component library**
 (a package with a `dist/`, or a Storybook). An app has no such artifact: its
-components are route-coupled, server-rendered, and styled with CSS Modules. This
+components are route-coupled, server-rendered, and styled with CSS Modules or
+Tailwind. This
 kit bridges that gap for the parts that are deterministic, and clearly marks the
 parts that need a human (or an AI pair) to finish.
 
@@ -60,7 +61,7 @@ only the generated `_ds_bundle.js` is gitignored.
 | `init` | write a config template | ✅ |
 | `generate [--only A,B]` | produce each component `.jsx` from its real app source (`appPath`) — inline app-lib, shim `next/*`, CSS-module → scoped class map, npm deps bare. The `.jsx` is a build artifact, **not a fork** | ✅ fully |
 | `drift [--only A,B]` | flag components whose app source changed since the last `generate` (**fresh / drifted / unsealed / manual / orphan**; exit 1 on drift) | ✅ |
-| `build [--only A,B]` | esbuild → `_ds_bundle.js` + `_ds_bundle.css` (`--js-only` / `--css-only` to publish one without clobbering the other) | ✅ fully |
+| `build [--only A,B]` | esbuild → `_ds_bundle.js` + `_ds_bundle.css`. `--js-only` / `--css-only` publish one without clobbering the other; **`--tailwind`** compiles the CSS with Tailwind (for shadcn/Tailwind apps) | ✅ fully |
 | `scaffold [--only A,B]` | stub `components/<Group>/<Name>/` metadata (`.d.ts`/`.prompt.md`/`.html`/`fixture.mjs`) with the CSS-module class map pre-extracted | ⚠️ stubs + TODOs |
 | `verify [--only A,B]` | headless-render each component with its `fixture.mjs`; **ok / blank / error** (exit 1 on any error) | ✅ |
 | `serve [--port]` | static-serve `outDir` for a browser render check | ✅ |
@@ -74,6 +75,23 @@ app — change the app, re-`generate`, no drift. **Omit `appPath`** for a compon
 must hand-author (e.g. one still wired to its own data fetching); `generate` skips
 it and `drift` marks it `manual`. `generate` fingerprints sources into
 `.dck-sync.json` (commit it) so `drift` — and CI — can catch a forgotten re-sync.
+
+### Styling: CSS Modules or Tailwind
+The kit handles both styling idioms — pick per repo:
+- **CSS Modules** (the default): `generate`/`build` compile each component's
+  `*.module.css` into scoped classes in `_ds_bundle.css`. Regenerate with
+  `build --css-only`.
+- **Tailwind / shadcn-ui**: utilities aren't CSS Modules, so esbuild can't emit
+  their CSS. Add a `tailwind` block to the config and build with `--tailwind`:
+  ```jsonc
+  "tailwind": { "input": "src/app/globals.css", "config": "tailwind.config.ts" }
+  ```
+  `build --tailwind` runs the Tailwind CLI with your `globals.css` (its `@tailwind`
+  directives + `:root`/`.dark` vars) and config, scanning the **generated** `.jsx`
+  as the content set — so `_ds_bundle.css` carries exactly the utilities those
+  components use, plus the theme vars. `--tailwind --css-only` regenerates just the CSS.
+  Generated shadcn components keep their utility classes (`bg-primary`, `h-10`, …)
+  and render fully styled once that CSS is in `styles.css`'s `@import` closure.
 
 ### Export style & resilience
 - **Default vs named exports** are auto-detected: `export default`, else a named

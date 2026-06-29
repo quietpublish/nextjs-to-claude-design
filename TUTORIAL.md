@@ -103,8 +103,13 @@ re-run `generate` when the app changes. `generate` also fingerprints each source
 ### B4. Build the bundle + compile CSS
 ```bash
 node ds-component-kit.mjs build --js-only   # bundle the generated .jsx → _ds_bundle.js
-node ds-component-kit.mjs build --css-only --config <appsrc>   # compile _ds_bundle.css from app CSS modules
+node ds-component-kit.mjs build --css-only --config <appsrc>   # CSS-Modules apps: compile _ds_bundle.css from app modules
 ```
+**Tailwind / shadcn-ui apps:** there are no CSS Modules — add a `tailwind` block
+to the config (`{ "input": "src/app/globals.css", "config": "tailwind.config.ts" }`)
+and run `node ds-component-kit.mjs build --tailwind`. It compiles `_ds_bundle.css`
+from your `globals.css` + config, scanning the generated `.jsx`, so only the
+utilities your components use ship (plus the `:root`/`.dark` theme vars).
 Wire the component CSS into the design closure:
 ```css
 /* styles.css */
