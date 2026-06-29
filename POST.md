@@ -175,6 +175,41 @@ So the durable picture: **tokens/fonts/conventions** are auto-derived from the g
 stylesheet and never drift; **components** are generated from app source (no fork) for
 the prop-driven set, with drift-detection guarding the handful that stay manual.
 
+## The round-trip: when the design system talks back
+
+The sync isn't one-way. Once the system is published you design *in* Claude
+Design — and the web app audits the artifacts you uploaded and hands findings
+*back* to the repo. Open the project, run its **`check_design_system`**, and it
+writes a `REPO-FIXES.md`: a handoff note of issues that originate in **synced
+source** (the compiled CSS, the generated typings, the component bundle) and so
+can't be fixed in the project — editing there is overwritten on the next sync.
+You fix them in the code repo and re-run `/design-sync`. That's the loop:
+
+> Claude Code syncs → you design in Claude Design → its self-check finds
+> repo-level problems → you fix the repo → re-sync. The design system becomes a
+> linter for the pipeline that feeds it.
+
+The most instructive finding came from exactly this. The check flagged:
+
+> "`_ds_bundle.js` has inlined externals (`react`, `react/jsx-runtime`) the
+> in-browser bundler can't reproduce — the edited components will break."
+
+The bundle had **inlined its own React**. But the preview runtime *provides*
+React as a global (its loader literally reads `window.React` / `window.ReactDOM`),
+so a second copy means two React instances — and two Reacts break hooks and
+context the moment a component mounts. The fix is to mark React **external** at
+build time and resolve it from the runtime global, never inline it. One
+discovery, made only by round-tripping: a component that renders fine in a
+local headless check can still be unmountable in the real runtime, for a reason
+that's invisible until the system inspects its own bundle.
+
+Two more gaps surfaced the same way — a **compound** component (`Card`) was
+registering its root but not its parts (`CardHeader`, `CardContent`, …), so a
+design composing them couldn't resolve them; and `verify` bundled every
+component in one pass, so one that failed to compile failed the whole batch.
+Both are the kind of thing you only notice when something downstream actually
+*uses* the output. Dogfooding the system against itself is the test.
+
 ## The tool
 
 [`ds-component-kit`](./ds-component-kit/) is a config-driven CLI for the whole
@@ -190,6 +225,10 @@ The [tutorial](./TUTORIAL.md) walks it end to end.
 - **Sync tokens first.** Most of the value, high-fidelity, fast. Components are a
   separate, larger project.
 - **The upload format is the contract, not the converter.** An app can produce it.
+- **The round-trip is the real test.** Publish, design on it, run the project's
+  self-check, and act on its `REPO-FIXES` in the repo. The runtime provides React
+  as a global — the bundle must use *that* one (mark React external), never inline
+  its own, or components mount unreliably.
 - **Components live in `components/<Group>/<Name>/` directories**; the `.html`'s
   `@dsCard` line is the card; the project re-indexes on open.
 - **Generate, don't copy.** Hand-authored component copies drift; generating them

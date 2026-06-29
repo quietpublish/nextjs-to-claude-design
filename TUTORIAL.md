@@ -141,7 +141,8 @@ node ds-component-kit.mjs scaffold --only YourComponent   # never clobbers edite
   ```html
   <!-- @dsCard group="Cards" name="YourComponent" subtitle="…" viewport="760x420" -->
   ```
-- **`fixture.mjs`** — realistic props for `verify`.
+- **`fixture.mjs`** — realistic props for `verify` (a compound component may also
+  export `children` so its parts render in place).
 
 These are metadata, not the implementation — small, and the only thing you maintain
 by hand. Commit the whole component source dir.
@@ -161,6 +162,41 @@ red (the kit ships a sample GitHub Actions workflow). Fix a drift by re-running
 
 ---
 
+## Part C — the round-trip (design back into the repo)
+
+The sync isn't one-way. After you design *in* Claude Design, the project can audit
+what you uploaded and hand findings back to the repo.
+
+### C1. Run the project's self-check
+Open the published project and run **`check_design_system`** (in the design
+chat). It inspects the synced artifacts — the compiled CSS tokens, the generated
+`.d.ts`, the component bundle — and writes a **`REPO-FIXES.md`**: a handoff note
+of issues that live in **synced source** and therefore can't be fixed in the
+project (edits there are overwritten on the next sync).
+
+### C2. Fix in the repo, then re-sync
+Each item is a repo change. The ones worth knowing up front:
+
+- **The bundle must not inline React.** The preview runtime *provides* React as a
+  global (its loader reads `window.React` / `window.ReactDOM`). A bundle that
+  inlined its own React gives you two React instances — hooks/context break and
+  components mount unreliably. `ds-component-kit build` handles this for you: it
+  marks `react`/`react-dom` external and resolves them from the runtime globals,
+  so `_ds_bundle.js` shares the runtime's one React. (Local `verify` still renders
+  with a real bundled React in headless Chrome — it has no `window.React`.)
+- **Type contracts need an exported `interface`.** The prop parser reads
+  `export interface FooProps { … }`; a bare `export type FooProps = …` alias is
+  skipped, so the props don't show. Prefer interfaces in your `.d.ts`.
+- **Tailwind token noise is cosmetic.** A synced Tailwind app registers Tailwind's
+  internal `--tw-*` plumbing variables as unclassified tokens. They're harmless
+  (your real tokens classify fine) and can't be stripped without breaking
+  utilities — note it and move on.
+
+Then re-run `/design-sync`. The loop — *sync → design → self-check → fix repo →
+re-sync* — turns the design system into a linter for the pipeline that feeds it.
+
+---
+
 ## Gotchas (collected from doing it)
 - **Publish before you look for it** in the canvas picker.
 - **The project re-indexes on open** — uploading isn't enough to verify.
@@ -169,3 +205,5 @@ red (the kit ships a sample GitHub Actions workflow). Fix a drift by re-running
 - **CSS must be in `styles.css`'s `@import` closure** — a card linking it
   directly proves nothing about designs.
 - **esbuild needs an explicit `baseUrl`** to resolve `@/*` path aliases.
+- **The runtime provides React as a global** — the bundle must use it (external),
+  not inline a second copy, or JS components mount unreliably.

@@ -93,10 +93,25 @@ The kit handles both styling idioms — pick per repo:
   Generated shadcn components keep their utility classes (`bg-primary`, `h-10`, …)
   and render fully styled once that CSS is in `styles.css`'s `@import` closure.
 
+### React comes from the runtime, not the bundle
+The Claude Design preview runtime provides React as a global (`window.React` /
+`window.ReactDOM`). `build` marks `react` / `react-dom` (and `react/jsx-runtime`)
+**external** and resolves them from those globals, so `_ds_bundle.js` shares the
+runtime's single React instance. Inlining a second copy gives you two Reacts —
+hooks and context break and components mount unreliably. This applies to `build`
+only: `verify` renders in real headless Chrome (no `window.React`), so it keeps a
+real bundled React. The shims live in `shims/react/` and `shims/react-dom/`.
+
 ### Export style & resilience
 - **Default vs named exports** are auto-detected: `export default`, else a named
   export matching the component `name`. For anything else (a differently-named
   export, or a re-export), set `"export": "<name>"` on the component's config entry.
+- **Compound components just work.** A module that exports a root plus parts
+  (`Card` + `CardHeader`/`CardTitle`/`CardContent`/…) only needs the root in
+  `components[]`; every other PascalCase export rides along on the namespace too,
+  so a design can compose `<Card><CardHeader>…</CardHeader></Card>`. The parts
+  aren't given their own cards — they're listed in the bundle header's
+  `unexposedExports`. (camelCase helpers like `buttonVariants` are not exposed.)
 - **`build` is resilient.** Components that can't resolve an export, or that fail
   to compile (e.g. they pull in an unshimmed dependency), are **skipped with a
   one-line reason** — the rest still build into the bundle. A component that turns
@@ -116,6 +131,12 @@ Chrome** and classifies the result:
 It auto-finds Chrome/Chromium/Edge; override with `--chrome <path>` or `CHROME=`.
 Components without a `fixture.mjs` are skipped (run `scaffold`, then author the
 fixture). Because it exits non-zero on any error, it's CI-friendly.
+
+A fixture exports `props`; a **compound** fixture may also export `children` (an
+element or array) so the parts render in place — e.g. `Tabs` with its
+`TabsList`/`TabsContent`. Like `build`, `verify` is resilient: a component that
+won't compile is isolated and reported as `error` (the others still render),
+rather than failing the whole batch.
 
 ```
   ◆ ds-component-kit › verify  3 selected
