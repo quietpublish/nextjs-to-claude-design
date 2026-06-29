@@ -8,8 +8,9 @@ For the *why* and the design decisions, read [the write-up](./POST.md). This is
 the *how*.
 
 **You'll need:** Claude Code with the `/design-sync` skill, a Claude account with
-design access, and Node ≥ 18. Time: tokens ~30 min; each component ~20–40 min of
-authoring.
+design access, Node ≥ 18, and Chrome/Chromium (for `verify`). Time: the token layer
+~30 min; components **generate** from source in seconds — budget ~10–20 min each
+for the hand-authored metadata (types, usage notes, preview card, fixture).
 
 ---
 
